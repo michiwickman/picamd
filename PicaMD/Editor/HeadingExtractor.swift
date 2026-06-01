@@ -1,7 +1,7 @@
 import Foundation
 
 /// One ATX heading discovered in the source.
-struct DocumentHeading: Identifiable, Equatable {
+struct DocumentHeading: Identifiable, Equatable, Sendable {
     let id: Int            // monotonic per-doc index, used for List diffing
     let level: Int         // 1...6
     let text: String       // heading text without the leading `#`s and the space

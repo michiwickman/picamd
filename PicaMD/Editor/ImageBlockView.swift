@@ -37,6 +37,11 @@ final class ImageBlockView: BlockAttachmentView {
         ])
 
         loadImage()
+
+        // VoiceOver: expose this overlay as an image element with the alt text.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.image)
+        setAccessibilityLabel(altText)
     }
 
     /// Match the `![alt](src)` pattern once and cache the captured
@@ -83,7 +88,8 @@ final class ImageBlockView: BlockAttachmentView {
         } else {
             URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
                 guard let self = self, let data = data, let img = NSImage(data: data) else { return }
-                DispatchQueue.main.async {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self = self else { return }
                     self.imageView.image = img
                     self.loadedImageSize = img.size
                     self.invalidateIntrinsicContentSize()

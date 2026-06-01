@@ -2,12 +2,49 @@ import AppKit
 
 @MainActor
 final class SyntaxHighlighter {
-    /// Default body font size when no theme is supplied.
-    private let baseFontSize: CGFloat = EditorFont.defaultBaseSize
-
     /// Active theme. Drives palette, heading font, body font, scale.
     /// `EditorTheme.default` if no one has set anything.
     var theme: EditorTheme = .default
+
+    /// Memoised render palette. `RenderPalette(theme:)` does HSB boosts
+    /// and alpha-blends on construction; rebuilding it on every highlight
+    /// pass (at the 16 ms cursor-move cadence) is pure waste since the
+    /// theme rarely changes. Rebuilt only when `theme` actually differs.
+    private var cachedPalette: RenderPalette?
+    private var cachedPaletteTheme: EditorTheme?
+
+    private func renderPalette() -> RenderPalette {
+        if let cached = cachedPalette, cachedPaletteTheme == theme { return cached }
+        let p = RenderPalette(theme: theme)
+        cachedPalette = p
+        cachedPaletteTheme = theme
+        return p
+    }
+
+    /// Memoised full-document block-structure scan (fenced code, math
+    /// blocks, frontmatter). These three regexes are inherently O(n) over
+    /// the whole document — re-running them on every cursor move (which
+    /// can't change block structure) was the dominant typing-latency cost
+    /// on large docs. Keyed on source identity; a text edit recomputes.
+    private var blockScanSource: String?
+    private var blockScanCode: [NSRange] = []
+    private var blockScanMath: [NSRange] = []
+    private var blockScanFrontmatter: [NSRange] = []
+
+    private func blockRangesScan(for source: String,
+                                  fullRange: NSRange) -> ([NSRange], [NSRange], [NSRange]) {
+        if blockScanSource == source {
+            return (blockScanCode, blockScanMath, blockScanFrontmatter)
+        }
+        let code = collect(Self.fencedCodeRegex, in: source, range: fullRange).map(\.range)
+        let math = collect(Self.mathBlockRegex, in: source, range: fullRange).map(\.range)
+        let front = collect(Self.frontmatterRegex, in: source, range: fullRange).map(\.range)
+        blockScanSource = source
+        blockScanCode = code
+        blockScanMath = math
+        blockScanFrontmatter = front
+        return (code, math, front)
+    }
 
     // Patterns shared with BlockExtractor live in MarkdownRegexes.
     private static var fencedCodeRegex: NSRegularExpression { MarkdownRegexes.fencedCode }
@@ -23,10 +60,10 @@ final class SyntaxHighlighter {
         pattern: #"^([ \t]*)([-*+]|\d+\.)([ \t]+)"#,
         options: [.anchorsMatchLines]
     )
-    private static let taskListRegex = try! NSRegularExpression(
-        pattern: #"^[ \t]*[-*+][ \t]+(\[[ xX]\])"#,
-        options: [.anchorsMatchLines]
-    )
+    // Task-list extraction now lives in `CheckboxOverlayManager.extractMatches(from:)`
+    // — used by both this highlighter (for concealment + strike-through)
+    // and the overlay manager (for view placement) so they can never
+    // disagree on which lines have checkboxes.
     private static let boldRegex = try! NSRegularExpression(
         pattern: #"(?<![*_\w])(\*\*|__)(?=\S)([\s\S]+?)(?<=\S)\1(?![*_\w])"#,
         options: []
@@ -114,12 +151,17 @@ final class SyntaxHighlighter {
         blocks: [ExtractedBlock] = [],
         blockHeights: [ExtractedBlock: CGFloat] = [:],
         viewportRange: NSRange? = nil,
-        focusMode: Bool = false
+        focusMode: Bool = false,
+        // Task-list matches, computed once by the caller and shared with
+        // the CheckboxOverlayManager so the two can't disagree. `nil`
+        // means "compute internally" (the path unit tests and any caller
+        // that doesn't pre-extract take).
+        taskMatches: [TaskListMatch]? = nil
     ) {
         let fullRange = NSRange(location: 0, length: textStorage.length)
         guard fullRange.length > 0 else { return }
         let source = textStorage.string
-        let palette = RenderPalette(theme: theme)
+        let palette = renderPalette()
         let baseFont = theme.bodyFont.font(size: theme.fontBaseSize)
         let cursor = cursorRange ?? NSRange(location: -1, length: 0)
         let blockRanges = blocks.map { $0.range }
@@ -138,10 +180,13 @@ final class SyntaxHighlighter {
 
         // Block-level detection always covers the whole document so the
         // overlay manager and protected-range logic see every block.
-        let codeRanges = collect(Self.fencedCodeRegex, in: source, range: fullRange).map(\.range)
-        let mathBlockRanges = collect(Self.mathBlockRegex, in: source, range: fullRange).map(\.range)
-        let frontmatterRanges = collect(Self.frontmatterRegex, in: source, range: fullRange).map(\.range)
+        // These three full-document regex scans are memoised by source:
+        // a cursor move (text unchanged) reuses the cache instead of
+        // re-scanning the whole doc at the 16 ms cursor-move cadence.
+        let (codeRanges, mathBlockRanges, frontmatterRanges) = blockRangesScan(for: source, fullRange: fullRange)
         let protected = codeRanges + mathBlockRanges + frontmatterRanges + blockRanges
+
+        let resolvedTaskMatches = taskMatches ?? CheckboxOverlayManager.extractMatches(from: source)
 
         paintBlockStructure(textStorage: textStorage,
                              source: source,
@@ -150,7 +195,8 @@ final class SyntaxHighlighter {
                              frontmatterRanges: frontmatterRanges,
                              palette: palette,
                              baseFont: baseFont,
-                             cursor: cursor)
+                             cursor: cursor,
+                             taskMatches: resolvedTaskMatches)
 
         paintInlineMarkers(textStorage: textStorage,
                             source: source,
@@ -238,10 +284,38 @@ final class SyntaxHighlighter {
                                             options: []) { value, range, _ in
                 guard let color = value as? NSColor else { return }
                 if color == .clear { return }   // concealed markup — leave hidden
+                // Idempotent: if this run is already dimmed (carries the
+                // stash), don't dim again — that would compound to 0.3×0.3.
+                if textStorage.attribute(.qmdUndimmedForeground,
+                                          at: range.location,
+                                          effectiveRange: nil) != nil {
+                    return
+                }
+                // Stash the pre-dim colour so a Focus-OFF toggle can
+                // restore the exact colour without a full regex re-highlight.
+                textStorage.addAttribute(.qmdUndimmedForeground, value: color, range: range)
                 let dimmed = color.withAlphaComponent(color.alphaComponent * 0.3)
                 textStorage.addAttribute(.foregroundColor, value: dimmed, range: range)
             }
         }
+    }
+
+    /// Undo Focus-Mode dimming across the whole document by restoring the
+    /// stashed pre-dim foreground colours. Cheap: a single O(n) attribute
+    /// walk, no regex passes — so toggling Focus off doesn't pay for a
+    /// full-document re-highlight (which froze 10k-line docs for seconds).
+    func removeFocusDim(textStorage: NSTextStorage) {
+        let full = NSRange(location: 0, length: textStorage.length)
+        guard full.length > 0 else { return }
+        textStorage.beginEditing()
+        textStorage.enumerateAttribute(.qmdUndimmedForeground,
+                                        in: full, options: []) { value, range, _ in
+            if let original = value as? NSColor {
+                textStorage.addAttribute(.foregroundColor, value: original, range: range)
+            }
+            textStorage.removeAttribute(.qmdUndimmedForeground, range: range)
+        }
+        textStorage.endEditing()
     }
 
     // MARK: - Per-pass helpers
@@ -260,12 +334,13 @@ final class SyntaxHighlighter {
         frontmatterRanges: [NSRange],
         palette: RenderPalette,
         baseFont: NSFont,
-        cursor: NSRange
+        cursor: NSRange,
+        taskMatches: [TaskListMatch]
     ) {
         // Frontmatter — muted code-block-style for the leading `---` block.
         for r in frontmatterRanges {
             textStorage.addAttribute(.foregroundColor, value: palette.muted, range: r)
-            textStorage.addAttribute(.font, value: monoFont(size: baseFontSize - 1), range: r)
+            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 1), range: r)
         }
 
         // Headings — proportional fonts per level, hash markers conceal
@@ -275,7 +350,7 @@ final class SyntaxHighlighter {
             let hashesRange = m.range(at: 1)
             let spaceRange = m.range(at: 2)
             let level = hashesRange.length
-            let active = cursor.touches(m.range)
+            let active = cursor.touchesBlock(m.range)
 
             textStorage.addAttribute(.font, value: headingFont(level: level), range: m.range)
             textStorage.addAttribute(.foregroundColor, value: palette.heading, range: m.range)
@@ -308,7 +383,7 @@ final class SyntaxHighlighter {
             if m.range.isInsideAny(of: protected) { continue }
             let markerRange = m.range(at: 1)
             let textRange = m.range(at: 2)
-            let active = cursor.touches(m.range)
+            let active = cursor.touchesBlock(m.range)
 
             textStorage.addAttribute(.foregroundColor, value: palette.muted, range: m.range)
             applyTrait(.italicFontMask, in: textStorage, range: textRange, baseFont: baseFont)
@@ -332,16 +407,58 @@ final class SyntaxHighlighter {
             let markerRange = m.range(at: 2)
             if markerRange.location != NSNotFound {
                 textStorage.addAttribute(.foregroundColor, value: palette.accent, range: markerRange)
-                textStorage.addAttribute(.font, value: monoFont(size: baseFontSize, bold: true), range: markerRange)
+                textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize, bold: true), range: markerRange)
             }
         }
 
-        // Task list checkbox.
-        for m in collect(Self.taskListRegex, in: source, range: workingRange) {
-            if m.range.isInsideAny(of: protected) { continue }
-            let boxRange = m.range(at: 1)
-            if boxRange.location != NSNotFound {
-                textStorage.addAttribute(.foregroundColor, value: palette.accent, range: boxRange)
+        // Task list checkbox: conceal `[ ]`/`[x]` markup off-cursor —
+        // the `CheckboxOverlayManager` paints a real checkbox at the
+        // boxRange's glyph rect — and strike-through + dim the rest of
+        // the line when the item is checked. Cursor-on-line restores
+        // raw markup so the user can edit `[ ]` ↔ `[x]` directly,
+        // matching the concealment idiom used by every other inline
+        // token in PicaMD.
+        //
+        // The `[ ]`/`[x]` BOX concealment is written for the FULL match
+        // set (not just the viewport slice): checkboxes are sparse, the
+        // CheckboxOverlayManager places a view for every match regardless
+        // of viewport, and an un-concealed off-viewport `[ ]` would peek
+        // out under its overlay. A box write carries no inline markup and
+        // is idempotent per match, so writing it doc-wide still converges
+        // with a single full pass (important for the progressive theme
+        // sweep, which highlights the doc in chunks).
+        //
+        // The strike-through + dim on the trailing TEXT, however, must stay
+        // within the working range: it sets `.foregroundColor`, and writing
+        // it outside the current chunk would clobber inline styling
+        // (e.g. `**bold**` inside a checked item) that an earlier chunk
+        // already painted and that no later pass would restore — making the
+        // chunked sweep diverge from a full pass.
+        for match in taskMatches {
+            if match.lineRange.isInsideAny(of: protected) { continue }
+
+            let active = cursor.touchesBlock(match.lineRange)
+            if active {
+                textStorage.addAttribute(.foregroundColor,
+                                         value: palette.accent,
+                                         range: match.boxRange)
+            } else {
+                // Keep the boxRange at its normal font size so the
+                // glyph rect has a well-defined width — the overlay
+                // manager queries that rect to position its 14×14 view.
+                textStorage.addAttribute(.foregroundColor,
+                                         value: NSColor.clear,
+                                         range: match.boxRange)
+            }
+
+            if match.checked && !active && match.textRange.length > 0
+                && NSLocationInRange(match.textRange.location, workingRange) {
+                textStorage.addAttribute(.strikethroughStyle,
+                                         value: NSUnderlineStyle.single.rawValue,
+                                         range: match.textRange)
+                textStorage.addAttribute(.foregroundColor,
+                                         value: palette.muted,
+                                         range: match.textRange)
             }
         }
     }
@@ -363,8 +480,8 @@ final class SyntaxHighlighter {
         for m in collect(Self.tableRowRegex, in: source, range: workingRange) {
             if m.range.isInsideAny(of: protected) { continue }
             let isSeparator = Self.tableSeparatorRegex.firstMatch(in: source, options: [], range: m.range) != nil
-            let active = cursor.touches(m.range)
-            textStorage.addAttribute(.font, value: monoFont(size: baseFontSize - 1), range: m.range)
+            let active = cursor.touchesBlock(m.range)
+            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 1), range: m.range)
             if isSeparator {
                 if !active {
                     textStorage.addAttribute(.foregroundColor, value: NSColor.clear, range: m.range)
@@ -381,13 +498,13 @@ final class SyntaxHighlighter {
 
         // Math block — conceal `$$` fences when cursor is outside, render inner as math.
         for r in mathBlockRanges {
-            let active = cursor.touches(r)
+            let active = cursor.touchesBlock(r)
             textStorage.setAttributes([
-                .font: NSFont.systemFont(ofSize: baseFontSize + 1),
+                .font: NSFont.systemFont(ofSize: theme.fontBaseSize + 1),
                 .foregroundColor: palette.math,
                 .backgroundColor: palette.codeBlockBackground,
             ], range: r)
-            applyTrait(.italicFontMask, in: textStorage, range: r, baseFont: NSFont.systemFont(ofSize: baseFontSize + 1))
+            applyTrait(.italicFontMask, in: textStorage, range: r, baseFont: NSFont.systemFont(ofSize: theme.fontBaseSize + 1))
             let centerPara = NSMutableParagraphStyle()
             centerPara.alignment = .center
             centerPara.lineSpacing = 6
@@ -478,7 +595,7 @@ final class SyntaxHighlighter {
             let openR = m.range(at: 1)
             let closeR = NSRange(location: m.range.location + m.range.length - openR.length, length: openR.length)
             let inner = m.range(at: 2)
-            textStorage.addAttribute(.font, value: monoFont(size: baseFontSize - 0.5), range: m.range)
+            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 0.5), range: m.range)
             textStorage.addAttribute(.foregroundColor, value: palette.code, range: m.range)
             textStorage.addAttribute(.backgroundColor, value: palette.codeBackground, range: inner)
             concealMarkers(textStorage: textStorage, ranges: [openR, closeR], pair: m.range, cursor: cursor, palette: palette)
@@ -490,7 +607,7 @@ final class SyntaxHighlighter {
             let openR = m.range(at: 1)
             let closeR = NSRange(location: m.range.location + m.range.length - openR.length, length: openR.length)
             textStorage.addAttribute(.foregroundColor, value: palette.math, range: m.range)
-            textStorage.addAttribute(.font, value: monoFont(size: baseFontSize - 0.5), range: m.range)
+            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 0.5), range: m.range)
             concealMarkers(textStorage: textStorage, ranges: [openR, closeR], pair: m.range, cursor: cursor, palette: palette)
         }
 
@@ -548,13 +665,13 @@ final class SyntaxHighlighter {
         for m in collect(Self.footnoteRefRegex, in: source, range: workingRange) {
             if m.range.isInsideAny(of: protected) { continue }
             textStorage.addAttribute(.foregroundColor, value: palette.link, range: m.range)
-            textStorage.addAttribute(.font, value: NSFont.systemFont(ofSize: baseFontSize - 3), range: m.range)
+            textStorage.addAttribute(.font, value: NSFont.systemFont(ofSize: theme.fontBaseSize - 3), range: m.range)
             textStorage.addAttribute(.baselineOffset, value: 4 as Any, range: m.range)
         }
         for m in collect(Self.footnoteDefRegex, in: source, range: workingRange) {
             if m.range.isInsideAny(of: protected) { continue }
             textStorage.addAttribute(.foregroundColor, value: palette.muted, range: m.range)
-            textStorage.addAttribute(.font, value: systemFont(size: baseFontSize - 1), range: m.range)
+            textStorage.addAttribute(.font, value: systemFont(size: theme.fontBaseSize - 1), range: m.range)
         }
     }
 
@@ -579,13 +696,23 @@ final class SyntaxHighlighter {
         //   .tinted  — solid background, no extra indent
         //   .stripe  — accent-coloured left bar, no background fill
         //   .flat    — muted text, no background, no decoration
+        //
+        // Block writes are clipped to `work` (the viewport slice). A
+        // whole-range write here would clobber, in already-painted chunks,
+        // the per-language tokens that `CodeBlockHighlighter` applies only
+        // within the current viewport — making the progressive theme sweep
+        // diverge from a full pass. Clipping keeps every chunk's writes
+        // inside its slice, so the union across chunks equals a full pass.
+        let work = viewportRange ?? NSRange(location: 0, length: (source as NSString).length)
         var codeRangesForTokenizing: [NSRange] = []
         for r in codeRanges {
             // Skip if this is a mermaid block (handled by overlay below).
             if blockRanges.contains(where: { NSEqualRanges($0, r) }) { continue }
+            let rWork = NSIntersectionRange(r, work)
+            if rWork.length == 0 { continue }   // code block outside this slice
 
             var attrs: [NSAttributedString.Key: Any] = [
-                .font: monoFont(size: baseFontSize - 0.5),
+                .font: monoFont(size: theme.fontBaseSize - 0.5),
             ]
             switch theme.codeStyle {
             case .card:
@@ -609,16 +736,16 @@ final class SyntaxHighlighter {
             case .flat:
                 attrs[.foregroundColor] = palette.muted
             }
-            textStorage.setAttributes(attrs, range: r)
+            textStorage.setAttributes(attrs, range: rWork)
             codeRangesForTokenizing.append(r)
 
             // Stripe-style: paint the accent on the leftmost char of every
             // line — a fake left-edge bar. A real vertical bar would need
-            // a custom NSLayoutManager.
+            // a custom NSLayoutManager. Walk only the in-slice portion.
             if theme.codeStyle == .stripe {
                 let nsSrc = source as NSString
-                var loc = r.location
-                while loc < r.location + r.length {
+                var loc = rWork.location
+                while loc < rWork.location + rWork.length {
                     let lineRange = nsSrc.lineRange(for: NSRange(location: loc, length: 0))
                     if lineRange.length > 0 {
                         let stripeRange = NSRange(location: lineRange.location, length: 1)
@@ -631,7 +758,7 @@ final class SyntaxHighlighter {
                 }
             }
 
-            let active = cursor.touches(r)
+            let active = cursor.touchesBlock(r)
             if !active {
                 // Conceal the opening + closing fence lines so the block
                 // looks like a clean code panel.
@@ -640,7 +767,7 @@ final class SyntaxHighlighter {
                 let closeLineStart = r.location + r.length
                 let closeLineRange = nsSource.lineRange(for: NSRange(location: max(0, closeLineStart - 1), length: 0))
                 for fence in [openLineRange, closeLineRange] {
-                    if fence.length > 0 {
+                    if fence.length > 0 && NSIntersectionRange(fence, work).length > 0 {
                         textStorage.addAttribute(.foregroundColor, value: NSColor.clear, range: fence)
                         textStorage.addAttribute(.font, value: tinyFont(), range: fence)
                     }
@@ -664,17 +791,23 @@ final class SyntaxHighlighter {
         for block in blocks {
             let r = block.range
             if cursor.touches(r) { continue }   // editing — keep source
+            let rWork = NSIntersectionRange(r, work)
+            if rWork.length == 0 { continue }   // overlay block outside this slice
             let nsSource = source as NSString
             textStorage.setAttributes([
                 .foregroundColor: NSColor.clear,
                 .font: tinyFont(),
-            ], range: r)
+            ], range: rWork)
+            // The min-line-height reservation goes on the block's first
+            // line — apply only when that line is in the current slice.
             let firstLine = nsSource.lineRange(for: NSRange(location: r.location, length: 0))
-            let height = blockHeights[block] ?? defaultHeight(for: block.kind)
-            let para = NSMutableParagraphStyle()
-            para.minimumLineHeight = height + 8
-            para.maximumLineHeight = height + 8
-            textStorage.addAttribute(.paragraphStyle, value: para, range: firstLine)
+            if NSIntersectionRange(firstLine, work).length > 0 {
+                let height = blockHeights[block] ?? defaultHeight(for: block.kind)
+                let para = NSMutableParagraphStyle()
+                para.minimumLineHeight = height + 8
+                para.maximumLineHeight = height + 8
+                textStorage.addAttribute(.paragraphStyle, value: para, range: firstLine)
+            }
         }
     }
 
@@ -697,7 +830,7 @@ final class SyntaxHighlighter {
             if m.range.isInsideAny(of: protected) { continue }
             let inner = m.range(at: 1)
             let active = cursor.touches(m.range)
-            textStorage.addAttribute(.font, value: monoFont(size: baseFontSize - 1), range: inner)
+            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 1), range: inner)
             textStorage.addAttribute(.foregroundColor, value: palette.foreground, range: inner)
             textStorage.addAttribute(.backgroundColor, value: palette.codeBackground, range: inner)
             let openTagLen = "<kbd>".count
@@ -818,6 +951,7 @@ final class SyntaxHighlighter {
     /// closing tag does). Outer blocks come BEFORE their inner blocks.
     private static func balancedDetailsRanges(in source: String,
                                               within bounds: NSRange) -> [NSRange] {
+        guard source.range(of: "<details", options: .caseInsensitive) != nil else { return [] }
         let nsString = source as NSString
         let length = nsString.length
         let openTag = "<details>"
@@ -1025,6 +1159,13 @@ private struct RenderPalette {
     }
 }
 
+extension NSAttributedString.Key {
+    /// Stashes a run's pre-dim foreground colour while Focus Mode dims it,
+    /// so toggling Focus off restores the exact colour with a cheap
+    /// attribute walk instead of a full regex re-highlight.
+    static let qmdUndimmedForeground = NSAttributedString.Key("qmdUndimmedForeground")
+}
+
 private extension NSRange {
     func isInsideAny(of ranges: [NSRange]) -> Bool {
         for r in ranges where NSLocationInRange(location, r) {
@@ -1039,6 +1180,18 @@ private extension NSRange {
     func touches(_ target: NSRange) -> Bool {
         let expandedStart = max(0, target.location - 1)
         let expandedEnd = target.location + target.length + 1
+        let cursorEnd = location + length
+        return cursorEnd >= expandedStart && location <= expandedEnd
+    }
+
+    /// Block-level variant of `touches(_:)` — no trailing +1 fuzz so a cursor
+    /// positioned exactly one character PAST the end of a block (i.e. on the
+    /// first character of the next line) does NOT count as touching. The
+    /// leading -1 is kept so a cursor at the very start of the opening line is
+    /// still inside the block's active zone.
+    func touchesBlock(_ target: NSRange) -> Bool {
+        let expandedStart = max(0, target.location - 1)
+        let expandedEnd = target.location + target.length   // no +1 here
         let cursorEnd = location + length
         return cursorEnd >= expandedStart && location <= expandedEnd
     }

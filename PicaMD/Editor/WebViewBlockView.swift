@@ -16,6 +16,11 @@ class WebViewBlockView: BlockAttachmentView {
     private var lastHeight: CGFloat = 80
     var onHeightChange: ((CGFloat) -> Void)?
 
+    /// Subclasses that stage their own HTML file should set this so
+    /// deinit can delete it and prevent monotonic cache growth.
+    /// The base class also sets it when it stages via resourceBaseURL().
+    var stagedFileURL: URL?
+
     override init(block: ExtractedBlock, documentURL: URL?) {
         let cfg = WKWebViewConfiguration()
         let prefs = WKWebpagePreferences()
@@ -26,6 +31,22 @@ class WebViewBlockView: BlockAttachmentView {
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    deinit {
+        // Belt-and-braces: stop any in-flight load so the WebContent
+        // process is not kept alive past eviction.
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        // removeAllScriptMessageHandlers() is macOS 14+; always true for
+        // our deployment target, but guard against accidental backport.
+        if #available(macOS 14.0, *) {
+            webView.configuration.userContentController.removeAllScriptMessageHandlers()
+        }
+        // Clean up the staged HTML file to prevent monotonic cache growth.
+        if let url = stagedFileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 
     override func setupContent() {
         layer?.cornerRadius = 6
@@ -106,6 +127,7 @@ class WebViewBlockView: BlockAttachmentView {
             let htmlURL = baseURL.appendingPathComponent(stagedFilename)
             do {
                 try html.write(to: htmlURL, atomically: true, encoding: .utf8)
+                stagedFileURL = htmlURL   // retained for deinit cleanup
                 webView.loadFileURL(htmlURL, allowingReadAccessTo: baseURL)
                 return
             } catch {

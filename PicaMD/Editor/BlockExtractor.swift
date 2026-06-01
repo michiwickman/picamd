@@ -1,13 +1,13 @@
 import Foundation
 
-enum BlockKind: Hashable {
+enum BlockKind: Hashable, Sendable {
     case table
     case image
     case mathBlock
     case mermaid
 }
 
-struct ExtractedBlock: Hashable {
+struct ExtractedBlock: Hashable, Sendable {
     let range: NSRange         // in markdown source
     let kind: BlockKind
     let payload: String        // raw markdown content (used to render)
@@ -31,7 +31,7 @@ enum BlockExtractor {
     private static var fencedCodeRegex: NSRegularExpression { MarkdownRegexes.fencedCode }
     private static var mermaidFenceRegex: NSRegularExpression { MarkdownRegexes.mermaidFence }
     private static var imageRegex: NSRegularExpression { MarkdownRegexes.blockImage }
-    static var resizeAttributeRegex: NSRegularExpression { MarkdownRegexes.imageResizeAttribute }
+    private static var resizeAttributeRegex: NSRegularExpression { MarkdownRegexes.imageResizeAttribute }
 
     static func extract(from source: String) -> [ExtractedBlock] {
         var blocks: [ExtractedBlock] = []
@@ -86,6 +86,10 @@ enum BlockExtractor {
     }
 
     private static func extractTables(in nsString: NSString, range: NSRange) -> [ExtractedBlock] {
+        // Fast path: skip the entire line-walk when there is no `|` in range.
+        if nsString.range(of: "|", options: [.literal], range: range).location == NSNotFound {
+            return []
+        }
         var results: [ExtractedBlock] = []
         let source = nsString as String
         var lineRanges: [NSRange] = []

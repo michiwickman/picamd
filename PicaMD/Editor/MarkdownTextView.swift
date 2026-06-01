@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import os
 
 /// Token signalling the editor to scroll/jump to a particular range.
 /// We use a UUID so consecutive jumps to the same range still trigger.
@@ -52,7 +53,9 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.isContinuousSpellCheckingEnabled = false
         textView.usesFontPanel = false
         textView.usesRuler = false
-        textView.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+        // Font is set by applyTheme(...) below from the active theme — no
+        // literal default here (it would be dead-overwritten in this same
+        // call frame and is a third, disagreeing "base size" source).
         textView.textContainerInset = NSSize(width: EditorLayout.textContainerInsetWidth,
                                              height: EditorLayout.textContainerInsetHeight)
         textView.isAutomaticDataDetectionEnabled = false
@@ -66,6 +69,7 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.usesFindPanel = false  // legacy panel is replaced by the bar
 
         textView.string = text
+        context.coordinator.seedTextMirror(text)
         context.coordinator.textView = textView
         context.coordinator.scrollView = scrollView
         context.coordinator.isDark = textView.effectiveAppearance.isDark
@@ -79,6 +83,18 @@ struct MarkdownTextView: NSViewRepresentable {
             coordinator?.scheduleHighlight(delay: 0)
         }
         context.coordinator.blockManager = blockManager
+
+        // Wire up the inline-checkbox overlay manager. The toggle
+        // closure flips the source `[ ]` ↔ `[x]` via NSTextStorage so
+        // the change goes through the standard undo path; a follow-up
+        // highlight pass then refreshes the strikethrough + overlay.
+        let checkboxManager = CheckboxOverlayManager()
+        checkboxManager.textView = textView
+        checkboxManager.theme = theme
+        checkboxManager.onToggle = { [weak coordinator = context.coordinator] range, newState in
+            coordinator?.toggleCheckbox(at: range, to: newState)
+        }
+        context.coordinator.checkboxManager = checkboxManager
 
         // Listen for live scroll changes so overlays follow the viewport.
         scrollView.contentView.postsBoundsChangedNotifications = true
@@ -115,6 +131,7 @@ struct MarkdownTextView: NSViewRepresentable {
         if textView.string != text {
             let selection = textView.selectedRange()
             textView.string = text
+            context.coordinator.seedTextMirror(text)
             let total = (text as NSString).length
             let location = min(selection.location, total)
             let length = min(selection.length, total - location)
@@ -128,22 +145,27 @@ struct MarkdownTextView: NSViewRepresentable {
             context.coordinator.applyHighlightingNow()
         }
 
-        // Live theme update
+        // Live theme update. Markup structure is unchanged — only colours
+        // and fonts — so repaint progressively (viewport first, rest in
+        // background chunks) instead of one blocking full-document pass.
         if context.coordinator.highlighter.theme != theme {
             context.coordinator.highlighter.theme = theme
             applyTheme(theme, to: scrollView, textView: textView)
-            context.coordinator.invalidateFullHighlight()
-            context.coordinator.applyHighlightingNow()
+            context.coordinator.applyThemeChangeProgressively()
         }
 
-        // Live mode-flag updates (Focus / Typewriter). Cheap to re-apply
-        // even when unchanged because the highlighter short-circuits the
-        // dim pass when `focusMode == false`. Typewriter just reads the
-        // flag from the coordinator each time the selection moves.
+        // Live mode-flag updates (Focus / Typewriter). The focus dim is
+        // already viewport-scoped, so toggling it does NOT need a full
+        // regex re-highlight (which froze large docs). Turning OFF just
+        // restores the stashed pre-dim colours doc-wide (cheap attribute
+        // walk) then repaints the viewport.
         if context.coordinator.focusMode != focusMode {
             context.coordinator.focusMode = focusMode
-            context.coordinator.invalidateFullHighlight()
-            context.coordinator.applyHighlightingNow()
+            if focusMode {
+                context.coordinator.applyHighlightingNow()
+            } else {
+                context.coordinator.removeFocusDimAndRepaint()
+            }
         }
         if context.coordinator.typewriterMode != typewriterMode {
             context.coordinator.typewriterMode = typewriterMode
@@ -196,6 +218,7 @@ struct MarkdownTextView: NSViewRepresentable {
         weak var scrollView: NSScrollView?
         let highlighter = SyntaxHighlighter()
         var blockManager: BlockOverlayManager?
+        var checkboxManager: CheckboxOverlayManager?
         let fileWatcher = FileWatcher()
         var isDark: Bool = false
         var lastConsumedJumpToken: EditorJumpToken?
@@ -214,6 +237,16 @@ struct MarkdownTextView: NSViewRepresentable {
         private var appearanceObservation: NSKeyValueObservation?
         private var lastDocumentURL: URL?
         private var pendingReloadAlert: Bool = false
+        /// Token for the per-window close observer that unregisters the
+        /// document from the MCP registry. Set once the window is known.
+        private var windowCloseObserver: NSObjectProtocol?
+        /// Lock-protected mirror of the editor's current text, kept in
+        /// sync on every change. `documentWillWrite` (nonisolated, fires
+        /// on the save queue) reads this SYNCHRONOUSLY to decide whether
+        /// the impending write is ours — without it we'd have to hop to
+        /// the main actor, which races the vnode event and lets our own
+        /// save surface as a spurious external-change alert.
+        private let currentTextMirror = OSAllocatedUnfairLock<String>(initialState: "")
         // Initial highlight pass is viewport-only too — saves 400+ ms
         // on a 10k-line cold-open. The textView's own textColor /
         // backgroundColor / font already covers off-viewport chars
@@ -287,6 +320,7 @@ struct MarkdownTextView: NSViewRepresentable {
             let selection = textView.selectedRange()
             textView.string = text
             parent.text = text
+            currentTextMirror.withLock { $0 = text }
             let total = (text as NSString).length
             let location = min(selection.location, total)
             let length = min(selection.length, total - location)
@@ -295,10 +329,45 @@ struct MarkdownTextView: NSViewRepresentable {
             applyHighlightingNow()
         }
 
+        /// Flip a task-list checkbox's source representation between
+        /// `[ ]` and `[x]`. Called from the overlay view's mouse-down.
+        /// Routes the edit through `NSTextView.shouldChangeText(...)`
+        /// so undo works and the SwiftUI text binding syncs via
+        /// `textDidChange`. The caller's caret position is preserved
+        /// — clicking a checkbox shouldn't move the cursor.
+        func toggleCheckbox(at range: NSRange, to checked: Bool) {
+            guard let textView = textView, let storage = textView.textStorage else { return }
+            guard range.length == 3, range.location + range.length <= storage.length else { return }
+            // STALE-RANGE GUARD. The overlay's onToggle closure captures the
+            // boxRange from the last highlight pass. Highlighting is debounced
+            // (~50 ms), so a fast click after typing/deleting elsewhere — or
+            // after an external reload replaced the buffer — can fire with a
+            // boxRange that no longer points at a checkbox. Without this check
+            // we'd splice `[x]` over 3 chars of arbitrary prose (an undoable
+            // corruption). Verify the target still holds a checkbox; if not,
+            // re-bind the overlay closures and drop this click.
+            let current = (storage.string as NSString).substring(with: range)
+            guard current == "[ ]" || current.lowercased() == "[x]" else {
+                applyHighlightingNow()
+                return
+            }
+            let replacement = checked ? "[x]" : "[ ]"
+            let savedSelection = textView.selectedRange()
+            if textView.shouldChangeText(in: range, replacementString: replacement) {
+                storage.replaceCharacters(in: range, with: replacement)
+                textView.didChangeText()
+            }
+            let total = storage.length
+            let safeLoc = min(savedSelection.location, total)
+            let safeLen = min(savedSelection.length, max(0, total - safeLoc))
+            textView.setSelectedRange(NSRange(location: safeLoc, length: safeLen))
+        }
+
         @objc func scrollDidChange(_ note: Notification) {
             // Cheap: just slide the existing overlay frames to follow the
             // glyph rects. Runs every tick during scroll.
             blockManager?.reposition()
+            checkboxManager?.reposition()
 
             // Expensive: re-evaluate which math/mermaid blocks should be
             // live-rendered (real WKWebView) vs placeholder. Debounce so
@@ -329,14 +398,58 @@ struct MarkdownTextView: NSViewRepresentable {
             // edit to B sneak past the reload alert and get silently
             // overwritten on B's next save — F2 in the adversarial
             // review).
-            let writtenText = note.userInfo?[MarkdownDocument.willWriteTextKey] as? String
-            Task { @MainActor [weak self] in
-                guard let self = self else { return }
-                if let writtenText, let current = self.textView?.string,
-                   writtenText != current {
-                    return  // not our save
+            //
+            // Done SYNCHRONOUSLY against a lock-protected text mirror
+            // rather than hopping to the main actor: the write happens on
+            // a background save queue and the resulting vnode event fires
+            // on `.main`; a `Task { @MainActor }` to call noteSelfWrite
+            // could be scheduled AFTER that event, so our own save would
+            // surface as a spurious "file changed on disk" alert.
+            guard let writtenText = note.userInfo?[MarkdownDocument.willWriteTextKey] as? String
+            else {
+                fileWatcher.noteSelfWrite()   // no payload to match — assume ours
+                return
+            }
+            if currentTextMirror.withLock({ $0 }) == writtenText {
+                fileWatcher.noteSelfWrite()   // our save — suppress the next vnode event
+                // Re-index Spotlight with the bytes that just hit disk.
+                // Indexing only ran once at open before, so frontmatter
+                // title/tag edits stayed stale in Spotlight until reopen.
+                // Not latency-critical (unlike noteSelfWrite), so a hop to
+                // the main actor for `lastDocumentURL` is fine here.
+                Task { @MainActor [weak self] in
+                    guard let self = self, let url = self.lastDocumentURL else { return }
+                    SpotlightIndexer.index(url: url, source: writtenText)
                 }
-                self.fileWatcher.noteSelfWrite()
+            }
+            // else: a different window's save — leave our watcher armed.
+        }
+
+        /// Observe the document window's close so we can deterministically
+        /// unregister from the MCP active-documents registry while `self`
+        /// is still alive on the main actor (the nonisolated deinit can't
+        /// touch main-actor state under Swift 6). Reads `lastDocumentURL`
+        /// at close time so a Save-As before closing unregisters the
+        /// current path, not the one open at window-creation.
+        private func installWindowCloseObserverIfNeeded(for textView: NSTextView) {
+            guard windowCloseObserver == nil, let window = textView.window else { return }
+            windowCloseObserver = NotificationCenter.default.addObserver(
+                forName: NSWindow.willCloseNotification,
+                object: window,
+                queue: .main
+            ) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self = self else { return }
+                    if let url = self.lastDocumentURL {
+                        ActiveDocumentsRegistry.shared.unregister(url: url)
+                    }
+                    // Self-remove: the window is gone, the observer has
+                    // done its one job.
+                    if let token = self.windowCloseObserver {
+                        NotificationCenter.default.removeObserver(token)
+                        self.windowCloseObserver = nil
+                    }
+                }
             }
         }
 
@@ -348,8 +461,9 @@ struct MarkdownTextView: NSViewRepresentable {
                     let nowDark = view.effectiveAppearance.isDark
                     if self.isDark != nowDark {
                         self.isDark = nowDark
-                        self.invalidateFullHighlight()
-                        self.applyHighlightingNow()
+                        // System dark-mode flip: same as a theme change —
+                        // progressive repaint, no full-doc freeze.
+                        self.applyThemeChangeProgressively()
                     }
                 }
             }
@@ -357,8 +471,18 @@ struct MarkdownTextView: NSViewRepresentable {
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            let str = textView.string
+            parent.text = str
+            currentTextMirror.withLock { $0 = str }
             scheduleHighlight(delay: EditorTiming.highlightDebounceMs)
+        }
+
+        /// Seed the lock-protected text mirror when the buffer is set
+        /// programmatically (initial load, external reload, binding push)
+        /// rather than via user typing. Keeps `documentWillWrite`'s
+        /// self-write detection accurate before the first edit.
+        func seedTextMirror(_ text: String) {
+            currentTextMirror.withLock { $0 = text }
         }
 
         func textViewDidChangeSelection(_ notification: Notification) {
@@ -408,12 +532,86 @@ struct MarkdownTextView: NSViewRepresentable {
             scrollView.reflectScrolledClipView(scrollView.contentView)
         }
 
+        /// Background sweep that repaints the off-screen part of the doc
+        /// with a new theme/appearance, chunk by chunk, after the visible
+        /// viewport has already been repainted. Cancelled by any edit or
+        /// cursor move (via `scheduleHighlight`).
+        private var progressiveHighlightTask: Task<Void, Never>?
+
         func scheduleHighlight(delay: Int = 50) {
+            // Any user activity supersedes an in-flight theme sweep: the
+            // normal viewport highlight takes over, and off-screen chunks
+            // catch up to the new theme as they scroll into view.
+            progressiveHighlightTask?.cancel()
             debounceTask?.cancel()
             debounceTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(delay))
                 guard !Task.isCancelled else { return }
                 self?.applyHighlightingNow()
+            }
+        }
+
+        /// Re-highlight the whole document for a theme / dark-mode change
+        /// WITHOUT freezing on large docs. The visible viewport is
+        /// repainted synchronously (instant feedback), then the rest of
+        /// the document is swept in newline-aligned chunks that yield to
+        /// the runloop between each, so typing and scrolling stay live.
+        /// The full-document block scans are memoised (see F3), so each
+        /// chunk only pays for its own inline passes.
+        func applyThemeChangeProgressively() {
+            progressiveHighlightTask?.cancel()
+            guard let textView = textView, let storage = textView.textStorage else { return }
+            let total = storage.length
+            guard total > 0 else { return }
+
+            // 1. Visible viewport first — the user sees the new theme now.
+            needsFullHighlight = false
+            applyHighlightingNow()
+
+            // 2. Sweep the remainder in background-yielded chunks.
+            let source = textView.string
+            let (blocks, taskMatches, _) = textDerivedScans(for: source)
+            let availableWidth = max(120, textView.bounds.width
+                                     - textView.textContainerInset.width * 2 - 16)
+            let heights = blockManager?.desiredHeights(for: blocks, width: availableWidth) ?? [:]
+            let chunkSize = EditorBuffer.progressiveChunkChars
+            let cursor = textView.selectedRange()
+            let dark = isDark
+            let focus = focusMode
+            let ns = source as NSString
+
+            progressiveHighlightTask = Task { @MainActor [weak self] in
+                var loc = 0
+                while loc < total {
+                    if Task.isCancelled { return }
+                    guard let self = self, let storage = self.textView?.textStorage else { return }
+                    let len = storage.length
+                    if loc >= len { return }   // text shrank — bail
+                    // Snap the chunk end to the next newline so an inline
+                    // construct (**bold**, `code`, …) is never split.
+                    var end = min(loc + chunkSize, len)
+                    if end < len {
+                        let nl = ns.range(of: "\n", options: [],
+                                          range: NSRange(location: end, length: ns.length - end))
+                        end = (nl.location != NSNotFound) ? nl.location + 1 : len
+                    }
+                    end = min(end, len)
+                    let chunk = NSRange(location: loc, length: max(0, end - loc))
+                    if chunk.length > 0 {
+                        self.highlighter.highlight(
+                            textStorage: storage,
+                            isDark: dark,
+                            cursorRange: cursor,
+                            blocks: blocks,
+                            blockHeights: heights,
+                            viewportRange: chunk,
+                            focusMode: focus,
+                            taskMatches: taskMatches
+                        )
+                    }
+                    loc = end
+                    await Task.yield()
+                }
             }
         }
 
@@ -426,6 +624,11 @@ struct MarkdownTextView: NSViewRepresentable {
             // Update on every pass since the window's representedURL may
             // not be set when makeNSView runs.
             if let url = textView.window?.representedURL, url != lastDocumentURL {
+                // Save-As / representedURL change: drop the stale entry so
+                // the registry doesn't double-count the old + new path.
+                if let old = lastDocumentURL {
+                    ActiveDocumentsRegistry.shared.unregister(url: old)
+                }
                 lastDocumentURL = url
                 blockManager?.documentURL = url
                 fileWatcher.startWatching(url)
@@ -441,10 +644,17 @@ struct MarkdownTextView: NSViewRepresentable {
                 // `workspace.openDocuments` tool result so Claude Code
                 // can read/search/edit it through MCP.
                 ActiveDocumentsRegistry.shared.register(url: url)
+                installWindowCloseObserverIfNeeded(for: textView)
             }
 
             let source = textView.string
-            let blocks = BlockExtractor.extract(from: source)
+            // Block extraction, task-list matches and protected ranges are
+            // all full-document scans derived purely from the text. They
+            // can't change unless the text changes, so memoise them by
+            // source — a cursor move (the 16 ms-debounced hot path) reuses
+            // the cache instead of re-scanning the whole document three
+            // more times.
+            let (blocks, taskMatches, protectedRanges) = textDerivedScans(for: source)
             let availableWidth = max(120, textView.bounds.width
                                      - textView.textContainerInset.width * 2 - 16)
             let heights = blockManager?.desiredHeights(for: blocks, width: availableWidth) ?? [:]
@@ -465,15 +675,60 @@ struct MarkdownTextView: NSViewRepresentable {
                 blocks: blocks,
                 blockHeights: heights,
                 viewportRange: viewport,
-                focusMode: focusMode
+                focusMode: focusMode,
+                taskMatches: taskMatches
             )
             blockManager?.update(blocks: blocks, cursorActiveRanges: [cursor])
+
+            // Inline-checkbox overlays. `protectedRanges` keeps clickable
+            // checkboxes off `- [ ]` lines inside ``` code or $$ math —
+            // a click there would mutate the user's documented source.
+            checkboxManager?.theme = highlighter.theme
+            checkboxManager?.update(matches: taskMatches,
+                                    cursorActiveRanges: [cursor],
+                                    protectedRanges: protectedRanges)
 
             // Refresh footnote-tooltip index so hover-popovers stay in
             // sync with the source. Cheap (regex pass over the doc).
             if let qmdView = textView as? PicaMDTextView {
                 qmdView.footnoteTooltip.updateIndex(from: source)
             }
+        }
+
+        /// Memoised text-derived scans (block overlays, task-list
+        /// checkboxes, protected code/math ranges). Keyed on source
+        /// identity so a cursor move reuses the cache; a text edit
+        /// recomputes. See `textDerivedScans(for:)`.
+        private var scanCacheSource: String?
+        private var scanCacheBlocks: [ExtractedBlock] = []
+        private var scanCacheTaskMatches: [TaskListMatch] = []
+        private var scanCacheProtected: [NSRange] = []
+
+        private func textDerivedScans(
+            for source: String
+        ) -> ([ExtractedBlock], [TaskListMatch], [NSRange]) {
+            if scanCacheSource == source {
+                return (scanCacheBlocks, scanCacheTaskMatches, scanCacheProtected)
+            }
+            let blocks = BlockExtractor.extract(from: source)
+            let matches = CheckboxOverlayManager.extractMatches(from: source)
+            let protectedRanges = CheckboxOverlayManager.protectedRanges(in: source)
+            scanCacheSource = source
+            scanCacheBlocks = blocks
+            scanCacheTaskMatches = matches
+            scanCacheProtected = protectedRanges
+            return (blocks, matches, protectedRanges)
+        }
+
+        /// Focus Mode turned off: restore the stashed pre-dim colours
+        /// across the whole document (cheap, no regex) then repaint the
+        /// viewport. Avoids the full-document re-highlight that the old
+        /// `invalidateFullHighlight()` path forced on every focus toggle.
+        func removeFocusDimAndRepaint() {
+            if let storage = textView?.textStorage {
+                highlighter.removeFocusDim(textStorage: storage)
+            }
+            applyHighlightingNow()
         }
 
         /// Forces the next `applyHighlightingNow()` call to re-highlight

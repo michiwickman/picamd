@@ -51,6 +51,13 @@ enum EditorBuffer {
     /// cover any inline-markup or block boundary that crosses the
     /// viewport edge in real-world docs.
     static let viewportContext: Int = 4000
+    /// Target chunk size (characters) for the progressive full-document
+    /// re-highlight that runs after a theme / dark-mode change. Small
+    /// enough that each chunk's inline passes finish in well under a
+    /// frame so the `Task.yield()` between chunks keeps typing and
+    /// scrolling responsive; the actual chunk end snaps to the next
+    /// newline so an inline construct is never split across a boundary.
+    static let progressiveChunkChars: Int = 8000
 }
 
 enum EditorFont {

@@ -52,15 +52,16 @@ class BlockAttachmentView: NSView {
 
     func appearanceChanged() {}
 
-    @objc private func themeDidChange() {
-        // Notification can fire on any thread; AppKit work must hop to main.
-        // (`ThemeStore` is `@MainActor`, so in practice this is already
-        // main, but be defensive — the framework promise here is just
-        // "main-actor write" not "main-actor delivery".)
-        if Thread.isMainThread {
-            appearanceChanged()
-        } else {
-            DispatchQueue.main.async { [weak self] in self?.appearanceChanged() }
+    @objc nonisolated private func themeDidChange() {
+        // Notification can fire on any thread. `@objc nonisolated` lets the
+        // ObjC runtime invoke this from any queue without tripping the
+        // @MainActor entry assertion that Swift 6 strict-concurrency inserts
+        // for NSView-derived classes — the same assertion that crashed
+        // `documentWillWrite` with `_dispatch_assert_queue_fail`. Hopping
+        // into a @MainActor Task does what the old `Thread.isMainThread`
+        // branch tried to do, but survives the entry-time isolation check.
+        Task { @MainActor [weak self] in
+            self?.appearanceChanged()
         }
     }
 
