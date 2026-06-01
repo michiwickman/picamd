@@ -114,7 +114,12 @@ final class KeychainTests: XCTestCase {
     /// Integration test: seeds a raw keychain item under the old QuickMD
     /// service, runs the migration, and asserts the new PicaMD account
     /// now holds the seeded value.
-    func testMigrationCopiesOldKeyToNew() async {
+    // @MainActor (just this method): migrateFromQuickMDIfNeeded is
+    // main-actor-isolated, and running the whole test on the main actor
+    // avoids "sending" the non-Sendable UserDefaults across an isolation
+    // boundary — both of which Xcode 16 rejects.
+    @MainActor
+    func testMigrationCopiesOldKeyToNew() {
         let oldService  = "de.michaelwittmann.QuickMD.ai"
         let oldAccount  = "QuickMD.ai.anthropic.apiKey"
         let newAccount  = AIProvider.anthropic.keychainAccount  // "PicaMD.ai.anthropic.apiKey"
@@ -166,11 +171,9 @@ final class KeychainTests: XCTestCase {
         let isolatedDefaults = UserDefaults(suiteName: suiteName)!
         defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
         // The suite is brand-new, so the migration marker is absent and the
-        // migration will run unconditionally. migrateFromQuickMDIfNeeded is
-        // @MainActor, so hop to the main actor for just this call.
-        await MainActor.run {
-            UserDefaultsMigration.migrateFromQuickMDIfNeeded(defaults: isolatedDefaults)
-        }
+        // migration will run unconditionally. (This test is @MainActor, so
+        // the @MainActor migration is called directly.)
+        UserDefaultsMigration.migrateFromQuickMDIfNeeded(defaults: isolatedDefaults)
 
         // ── Assert the new account now holds the seeded value ────────────
         let migrated = Keychain.get(account: newAccount)
