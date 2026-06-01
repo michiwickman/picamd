@@ -25,6 +25,7 @@ enum WorkspaceTools {
                 "type": "object",
                 "properties": [:],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { _ in
                 let entries = DocumentRegistry.activeDocuments()
                 let isoFormatter = ISO8601DateFormatter()
@@ -57,6 +58,7 @@ enum WorkspaceTools {
                     "query": ["type": "string"],
                 ],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { args in
                 guard let query = args["query"] as? String, !query.isEmpty else {
                     throw MCPError("workspace.search: missing or empty `query`")
@@ -101,6 +103,7 @@ enum DocumentTools {
                     "path": ["type": "string", "description": "Absolute path to the .md file"],
                 ],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { args in
                 let path = try requirePath(from: args)
                 let stats = DocumentRegistry.stats(at: path)
@@ -130,6 +133,7 @@ enum DocumentTools {
                     "path": ["type": "string"],
                 ],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { args in
                 let path = try requirePath(from: args)
                 let source = try requireRead(path)
@@ -165,6 +169,7 @@ enum DocumentTools {
                     "end":   ["type": "integer", "minimum": 1, "description": "1-indexed end line, inclusive"],
                 ],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { args in
                 let path = try requirePath(from: args)
                 guard let start = args["start"] as? Int else { throw MCPError("readLines: `start` required") }
@@ -205,6 +210,7 @@ enum DocumentTools {
                     "heading": ["type": "string", "description": "Heading text to match (case-insensitive, exact match on text after the # markers)"],
                 ],
             ],
+            annotations: ["readOnlyHint": true],
             invoke: { args in
                 let path = try requirePath(from: args)
                 guard let target = args["heading"] as? String, !target.isEmpty else {
@@ -261,6 +267,7 @@ enum DocumentTools {
                     "text":  ["type": "string", "description": "Replacement content. Trailing newline is added automatically if missing."],
                 ],
             ],
+            annotations: ["destructiveHint": true, "idempotentHint": false],
             invoke: { args in
                 let path = try requirePath(from: args)
                 guard let start = args["start"] as? Int else { throw MCPError("replaceLines: `start` required") }
@@ -270,7 +277,17 @@ enum DocumentTools {
 
                 let source = try requireRead(path)
                 var lines = source.components(separatedBy: "\n")
-                let lo = min(start - 1, lines.count)
+
+                // F10: reject start past EOF so callers don't silently insert
+                // at end when they meant to replace a line that doesn't exist.
+                // start == lines.count+1 is the one allowed edge-case: it
+                // yields a zero-line replace (lo == hi) at the very end, which
+                // is a valid no-op insert position. Anything beyond that is a
+                // programming error; tell the caller to use appendText instead.
+                guard start <= lines.count + 1 else {
+                    throw MCPError("replaceLines: start=\(start) is past EOF (file has \(lines.count) lines). Use appendText to add content at the end.")
+                }
+                let lo = start - 1          // 0-indexed; never clamped
                 let hi = min(end, lines.count)
 
                 let replacementLines = newText.components(separatedBy: "\n")
@@ -302,6 +319,7 @@ enum DocumentTools {
                     "text": ["type": "string"],
                 ],
             ],
+            annotations: ["destructiveHint": true, "idempotentHint": false],
             invoke: { args in
                 let path = try requirePath(from: args)
                 guard let text = args["text"] as? String else { throw MCPError("appendText: `text` required") }
@@ -321,10 +339,34 @@ enum DocumentTools {
 // MARK: - Helpers
 
 private func requirePath(from args: [String: Any]) throws -> String {
-    guard let path = args["path"] as? String, !path.isEmpty else {
+    guard let raw = args["path"] as? String, !raw.isEmpty else {
         throw MCPError("missing `path` argument")
     }
-    return (path as NSString).expandingTildeInPath
+    let expanded = (raw as NSString).expandingTildeInPath
+
+    // SCOPE GUARD. The sidecar runs unsandboxed inside the app bundle and
+    // inherits the user's full disk access. Without a check here, every
+    // document.* tool would read/write ANY path the caller passes — so a
+    // prompt-injection block inside an opened .md could tell the LLM to
+    // `readLines path='~/.ssh/id_rsa'` and exfiltrate it via `appendText`,
+    // or `replaceLines path='~/.zshrc'` to plant a shell backdoor. Restrict
+    // to files the user actually has open in PicaMD. Canonicalize BOTH the
+    // request and the registry entries the same way (resolve symlinks +
+    // standardize) so `../` traversal and /private symlink games can't
+    // escape the allow-list.
+    let canonical = canonicalize(expanded)
+    let openDocs = DocumentRegistry.activeDocuments().map { canonicalize($0.path) }
+    guard openDocs.contains(canonical) else {
+        throw MCPError("path is not an open PicaMD document: \(raw)")
+    }
+    return expanded
+}
+
+/// Resolve a path to a canonical form for allow-list comparison:
+/// expand `~`, resolve symlinks, and standardize away `..`/`.` segments.
+private func canonicalize(_ path: String) -> String {
+    let expanded = (path as NSString).expandingTildeInPath
+    return (expanded as NSString).resolvingSymlinksInPath
 }
 
 private func requireRead(_ path: String) throws -> String {

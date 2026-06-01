@@ -13,7 +13,25 @@ final class ToolRegistry {
         let name: String
         let description: String
         let inputSchema: [String: Any]
+        /// Optional MCP tool annotations (readOnlyHint, destructiveHint,
+        /// idempotentHint, …). Serialised under the `annotations` key in
+        /// tools/list responses. nil → key omitted from response.
+        let annotations: [String: Any]?
         let invoke: ([String: Any]) throws -> Any
+
+        init(
+            name: String,
+            description: String,
+            inputSchema: [String: Any],
+            annotations: [String: Any]? = nil,
+            invoke: @escaping ([String: Any]) throws -> Any
+        ) {
+            self.name = name
+            self.description = description
+            self.inputSchema = inputSchema
+            self.annotations = annotations
+            self.invoke = invoke
+        }
     }
 
     private var tools: [String: Tool] = [:]
@@ -31,11 +49,17 @@ final class ToolRegistry {
         let serialised: [[String: Any]] = tools.values
             .sorted { $0.name < $1.name }
             .map { tool in
-                return [
+                var entry: [String: Any] = [
                     "name": tool.name,
                     "description": tool.description,
                     "inputSchema": tool.inputSchema,
                 ]
+                // C8: emit annotations only when present so the response stays
+                // compact for unannotated tools.
+                if let ann = tool.annotations {
+                    entry["annotations"] = ann
+                }
+                return entry
             }
         return ["tools": serialised]
     }
@@ -64,15 +88,29 @@ final class ToolRegistry {
         let text: String
         if let s = result as? String {
             text = s
-        } else if JSONSerialization.isValidJSONObject(result),
-                  let data = try? JSONSerialization.data(
-                      withJSONObject: result,
-                      options: [.prettyPrinted, .sortedKeys]
-                  ),
-                  let s = String(data: data, encoding: .utf8) {
-            text = s
         } else {
-            text = "\(result)"
+            // F11: surface JSON-serialization failures explicitly rather than
+            // letting a debug "\(result)" string slip through to the client,
+            // which would be invalid JSON in a JSON-RPC context and hard to
+            // diagnose. Any tool that returns a non-serializable type has a
+            // bug; fail loudly.
+            guard JSONSerialization.isValidJSONObject(result) else {
+                throw MCPError("tool \(name): result is not JSON-serializable (\(type(of: result)))")
+            }
+            do {
+                let data = try JSONSerialization.data(
+                    withJSONObject: result,
+                    options: [.prettyPrinted, .sortedKeys]
+                )
+                guard let s = String(data: data, encoding: .utf8) else {
+                    throw MCPError("tool \(name): JSON data is not valid UTF-8")
+                }
+                text = s
+            } catch let serErr as MCPError {
+                throw serErr
+            } catch {
+                throw MCPError("tool \(name): JSON serialization failed: \(error.localizedDescription)")
+            }
         }
         return [
             "content": [

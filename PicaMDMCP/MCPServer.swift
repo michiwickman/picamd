@@ -46,9 +46,16 @@ final class MCPServer {
 
     // MARK: - Frame handling
 
-    private func handle(frameData: Data, write: (Data) -> Void) {
+    /// Internal (not private) so unit tests can drive the server
+    /// by feeding raw JSON frames without a real stdin/stdout loop.
+    func handle(frameData: Data, write: (Data) -> Void) {
         guard let request = try? JSONSerialization.jsonObject(with: frameData) as? [String: Any] else {
-            return  // malformed — drop silently per JSON-RPC parse-error rules
+            // F12: JSON-RPC 2.0 §5 requires a parse-error response even when
+            // the id cannot be extracted. Use explicit NSNull so the "id" key
+            // is present in the response with a JSON null value, rather than
+            // being omitted — per spec, id MUST be null on parse error.
+            sendError(write: write, id: NSNull(), code: -32700, message: "parse error")
+            return
         }
         let id = request["id"]
         guard let method = request["method"] as? String else {

@@ -191,6 +191,7 @@ targets:
       - path: PicaMDMCP/ToolRegistry.swift
       - path: PicaMDMCP/Tools.swift
       - path: PicaMDMCP/DocumentRegistry.swift
+      - path: PicaMDMCP/MCPServer.swift
     dependencies:
       # PicaMD as the dep makes xcodegen put this test bundle in the
       # scheme's BuildAction (otherwise the scheme's TestAction lists

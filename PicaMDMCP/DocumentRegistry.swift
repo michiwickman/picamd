@@ -17,7 +17,16 @@ enum DocumentRegistry {
         let openedAt: Date
     }
 
+    /// Test-only override for the registry file location, so unit tests
+    /// can stage a controlled set of "open" documents without touching
+    /// the real `~/Library/Application Support` file. Production code
+    /// never sets this; tests set it serially on the main thread, so the
+    /// `nonisolated(unsafe)` opt-out of Swift 6's global-state check is
+    /// sound here.
+    nonisolated(unsafe) static var registryFileURLOverride: URL?
+
     static var registryFileURL: URL {
+        if let override = registryFileURLOverride { return override }
         let base = FileManager.default.urls(for: .applicationSupportDirectory,
                                               in: .userDomainMask).first
             ?? FileManager.default.temporaryDirectory
