@@ -10,23 +10,24 @@ import Security
 /// All tests touch the REAL login keychain using unique, throwaway
 /// account names that include a UUID. Every entry written is cleaned
 /// up in `tearDown` so the suite is safe to run repeatedly.
-@MainActor
+// NOT @MainActor: the Keychain primitives are plain statics, so setUp/
+// tearDown and most tests stay nonisolated. Only the migration call is
+// main-actor-isolated; that single test hops via `await MainActor.run`.
+// (Marking the whole class @MainActor tripped Xcode 16's stricter
+// "sending main-actor XCTestCase to nonisolated super" check.)
 final class KeychainTests: XCTestCase {
 
     // Unique per-run suffix so parallel test runs can't collide.
     private var runID: String!
 
-    // `async throws` overrides so they run on the main actor (this class
-    // is @MainActor) — the synchronous setUp()/tearDown() overrides are
-    // nonisolated under Swift 6 / Xcode 16 and can't mutate `runID`.
-    override func setUp() async throws {
-        try await super.setUp()
+    override func setUp() {
+        super.setUp()
         runID = UUID().uuidString
     }
 
-    override func tearDown() async throws {
+    override func tearDown() {
         runID = nil
-        try await super.tearDown()
+        super.tearDown()
     }
 
     // MARK: - Helpers
@@ -113,7 +114,7 @@ final class KeychainTests: XCTestCase {
     /// Integration test: seeds a raw keychain item under the old QuickMD
     /// service, runs the migration, and asserts the new PicaMD account
     /// now holds the seeded value.
-    func testMigrationCopiesOldKeyToNew() {
+    func testMigrationCopiesOldKeyToNew() async {
         let oldService  = "de.michaelwittmann.QuickMD.ai"
         let oldAccount  = "QuickMD.ai.anthropic.apiKey"
         let newAccount  = AIProvider.anthropic.keychainAccount  // "PicaMD.ai.anthropic.apiKey"
@@ -165,8 +166,11 @@ final class KeychainTests: XCTestCase {
         let isolatedDefaults = UserDefaults(suiteName: suiteName)!
         defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
         // The suite is brand-new, so the migration marker is absent and the
-        // migration will run unconditionally.
-        UserDefaultsMigration.migrateFromQuickMDIfNeeded(defaults: isolatedDefaults)
+        // migration will run unconditionally. migrateFromQuickMDIfNeeded is
+        // @MainActor, so hop to the main actor for just this call.
+        await MainActor.run {
+            UserDefaultsMigration.migrateFromQuickMDIfNeeded(defaults: isolatedDefaults)
+        }
 
         // ── Assert the new account now holds the seeded value ────────────
         let migrated = Keychain.get(account: newAccount)
