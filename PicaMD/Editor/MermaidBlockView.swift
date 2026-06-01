@@ -25,6 +25,11 @@ final class MermaidBlockView: WebViewBlockView {
             content = lines.dropFirst().dropLast().joined(separator: "\n")
         }
 
+        // VoiceOver: expose the Mermaid source so assistive tech can read it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityValue(content)
+
         let source = content
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
@@ -33,6 +38,13 @@ final class MermaidBlockView: WebViewBlockView {
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "`", with: "\\`")
             .replacingOccurrences(of: "$", with: "\\$")
+            // Defeat `</script>` end-tag detection — `\(escaped)` is
+            // interpolated into JS template literals inside <script>
+            // elements (lines below). `<\/` is a no-op JS escape but
+            // stops the HTML parser from closing the tag early. The
+            // `source` var above is already HTML-escaped (< → &lt;) for
+            // the diagram div, so only `escaped` needs this.
+            .replacingOccurrences(of: "</", with: "<\\/")
 
         let theme = isDark ? "dark" : "default"
         let bg = isDark ? "#1d1d1f" : "#fafafa"
@@ -43,7 +55,10 @@ final class MermaidBlockView: WebViewBlockView {
         if MermaidRenderingBundle.isAvailable {
             scriptSrc = "mermaid.min.js"
         } else {
-            scriptSrc = "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.min.js"
+            // Keep the CDN-fallback version in lockstep with the version
+            // MermaidRenderingBundle caches, or the offline copy and the
+            // first-render online copy diverge.
+            scriptSrc = MermaidRenderingBundle.cdnURL
             // Kick off the download for next time.
             MermaidRenderingBundle.ensureInstalled { _ in }
         }
@@ -71,7 +86,7 @@ final class MermaidBlockView: WebViewBlockView {
         <script>
         function tryRender() {
           if (window.mermaid) {
-            mermaid.initialize({startOnLoad:false, theme:'\(theme)', securityLevel:'loose'});
+            mermaid.initialize({startOnLoad:false, theme:'\(theme)', securityLevel:'strict'});
             mermaid.run({nodes: [document.getElementById('diagram')]}).then(function() {
               if (window.webkit) window.webkit.messageHandlers.height.postMessage(document.body.scrollHeight);
             }).catch(function(e) {
@@ -93,6 +108,7 @@ final class MermaidBlockView: WebViewBlockView {
         let htmlURL = cacheDir.appendingPathComponent("mermaid-\(block.range.location).html")
         do {
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
+            stagedFileURL = htmlURL   // so WebViewBlockView.deinit can delete it
             webView.loadFileURL(htmlURL, allowingReadAccessTo: cacheDir)
         } catch {
             webView.loadHTMLString(html, baseURL: nil)

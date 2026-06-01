@@ -13,11 +13,25 @@ enum MathRenderingBundle {
     /// `~/Library/Caches/PicaMD/Math/`. KaTeX's `katex.min.js`,
     /// `katex.min.css` and `fonts/*.woff2` get copied here on first
     /// use; subsequent renders reuse the existing files.
+    ///
+    /// [F18] Uses the throwing FileManager variant so a sandbox or
+    /// permission failure surfaces in the log rather than silently
+    /// falling back to a reboot-purged temp dir that forces re-staging
+    /// KaTeX every launch.
     static let cacheDir: URL = {
-        let base = (FileManager.default.urls(for: .cachesDirectory,
-                                              in: .userDomainMask).first
-                    ?? URL(fileURLWithPath: NSTemporaryDirectory()))
-        return base.appendingPathComponent("PicaMD/Math", isDirectory: true)
+        do {
+            let base = try FileManager.default.url(
+                for: .cachesDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            return base.appendingPathComponent("PicaMD/Math", isDirectory: true)
+        } catch {
+            NSLog("PicaMD: Math cache dir fallback to temp: %@", error.localizedDescription)
+            return URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent("PicaMD/Math", isDirectory: true)
+        }
     }()
 
     /// Copy the KaTeX assets out of the app bundle into `cacheDir`.

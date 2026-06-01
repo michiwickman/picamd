@@ -41,7 +41,8 @@ struct AIClient {
            apiKey: String?,
            session: URLSession = .shared) {
         guard let url = URL(string: endpointString),
-              url.scheme != nil,
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",   // reject file://, ftp://, etc.
               url.host != nil else {
             return nil
         }

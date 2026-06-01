@@ -29,10 +29,22 @@ final class MathBlockView: WebViewBlockView {
         if content.hasSuffix("$$") { content = String(content.dropLast(2)) }
         content = content.trimmingCharacters(in: .whitespacesAndNewlines)
 
+        // VoiceOver: expose the LaTeX source so assistive tech can read it.
+        setAccessibilityElement(true)
+        setAccessibilityRole(.staticText)
+        setAccessibilityValue(content)
+
         let escaped = content
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "`", with: "\\`")
             .replacingOccurrences(of: "$", with: "\\$")
+            // Defeat the HTML tokeniser's `</script>` end-tag detection.
+            // `\(escaped)` is interpolated into a JS template literal inside
+            // a <script> element; a doc containing `</script>` would otherwise
+            // close the tag early and execute arbitrary injected HTML/JS.
+            // `<\/` is a no-op escape in JS strings (yields `/`) but the HTML
+            // parser no longer sees a candidate end-tag.
+            .replacingOccurrences(of: "</", with: "<\\/")
 
         let bg = isDark ? "#1d1d1f" : "#fafafa"
         let fg = isDark ? "#e0e0e0" : "#1a1a1a"
@@ -85,6 +97,7 @@ final class MathBlockView: WebViewBlockView {
         let htmlURL = cacheDir.appendingPathComponent("math-\(block.range.location).html")
         do {
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
+            stagedFileURL = htmlURL   // so WebViewBlockView.deinit can delete it
             webView.loadFileURL(htmlURL, allowingReadAccessTo: cacheDir)
             return true
         } catch {

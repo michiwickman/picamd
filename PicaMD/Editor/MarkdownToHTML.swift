@@ -340,6 +340,77 @@ enum MarkdownToHTML {
         a.footnote-back:hover { opacity: 1; }
     """
 
+    /// Sanitize a raw HTML string that came from a user-authored Markdown
+    /// document. This is necessary because .md files may be untrusted
+    /// (received by mail, downloaded from the web, cloned from an unknown
+    /// repo) and PicaMD exports / QuickLook-previews them in a browser
+    /// context. The sanitizer:
+    ///   - Removes `<script>`, `<style>`, `<iframe>`, `<object>`, `<embed>`
+    ///     elements together with all their content (start-tag to end-tag).
+    ///   - Strips all `on*=` event-handler attributes from any remaining tag.
+    ///   - Strips `href`/`src`/`action` attribute values that start with
+    ///     `javascript:` (case-insensitive, whitespace-tolerant).
+    ///
+    /// Ordinary formatting tags (`<b>`, `<i>`, `<em>`, `<strong>`,
+    /// `<a>`, `<code>`, `<span>`, `<div>`, comments, etc.) are left intact.
+    ///
+    /// A regex-based approach is deliberately chosen: this codebase has
+    /// no SwiftSoup / HTML-parser dependency, and adding one for this
+    /// single use-case is out of scope. The patterns are conservative —
+    /// they may over-strip in exotic edge cases (e.g. nested quotes in
+    /// event attrs), which is acceptable: the failure mode is slightly
+    /// degraded rendering, not XSS.
+    static func sanitizeHTML(_ html: String) -> String {
+        var s = html
+
+        // 1. Remove dangerous block elements including all their content.
+        //    Pattern: <tag …> … </tag> (case-insensitive, dot matches
+        //    newlines via `.dotMatchesLineSeparators`).
+        let dangerousTags = ["script", "style", "iframe", "object", "embed"]
+        for tag in dangerousTags {
+            let pattern = "<\(tag)(\\s[^>]*)?>.*?</\(tag)>"
+            if let re = try? NSRegularExpression(
+                pattern: pattern,
+                options: [.caseInsensitive, .dotMatchesLineSeparators]
+            ) {
+                let range = NSRange(s.startIndex..., in: s)
+                s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+            }
+            // Also remove self-closing / void forms: <embed …> <object …>
+            let voidPattern = "<\(tag)(\\s[^>]*)?(/)?>?"
+            if let re = try? NSRegularExpression(
+                pattern: voidPattern,
+                options: [.caseInsensitive]
+            ) {
+                let range = NSRange(s.startIndex..., in: s)
+                s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+            }
+        }
+
+        // 2. Strip on* event-handler attributes from surviving tags.
+        //    Matches both single- and double-quoted values, and unquoted.
+        //    Pattern: \s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)
+        if let re = try? NSRegularExpression(
+            pattern: #"\s+on[a-zA-Z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#,
+            options: [.caseInsensitive]
+        ) {
+            let range = NSRange(s.startIndex..., in: s)
+            s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+        }
+
+        // 3. Strip javascript: URLs from href/src/action attributes.
+        //    Tolerates whitespace and mixed case between "javascript" and ":".
+        if let re = try? NSRegularExpression(
+            pattern: #"(href|src|action)\s*=\s*["']?\s*javascript\s*:[^"'\s>]*["']?"#,
+            options: [.caseInsensitive]
+        ) {
+            let range = NSRange(s.startIndex..., in: s)
+            s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+        }
+
+        return s
+    }
+
     static func htmlEscape(_ s: String) -> String {
         var out = ""
         out.reserveCapacity(s.count)
@@ -441,8 +512,13 @@ private struct HTMLVisitor: MarkupVisitor {
     }
 
     mutating func visitHTMLBlock(_ htmlBlock: HTMLBlock) -> String {
-        // Pass through verbatim. Source already trusted (user's own doc).
-        htmlBlock.rawHTML + "\n"
+        // Sanitize before emitting. Raw .md files may be opened as
+        // QuickLook previews or exported HTML and viewed in a browser;
+        // in those contexts the author is not necessarily trusted (e.g.
+        // a .md file received by e-mail, downloaded, or part of an
+        // untrusted repo). Strip executable elements and event handlers
+        // while keeping ordinary formatting tags intact.
+        MarkdownToHTML.sanitizeHTML(htmlBlock.rawHTML) + "\n"
     }
 
     mutating func visitThematicBreak(_ thematicBreak: ThematicBreak) -> String {
@@ -491,7 +567,8 @@ private struct HTMLVisitor: MarkupVisitor {
     }
 
     mutating func visitInlineHTML(_ inlineHTML: InlineHTML) -> String {
-        inlineHTML.rawHTML
+        // Same trust argument as visitHTMLBlock — sanitize before emitting.
+        MarkdownToHTML.sanitizeHTML(inlineHTML.rawHTML)
     }
 
     mutating func visitLink(_ link: Link) -> String {
