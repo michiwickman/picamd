@@ -4,43 +4,27 @@ import XCTest
 /// Tests for FileWatcher, which watches a file URL via a Dispatch vnode
 /// source and fires `onExternalChange` on .main.
 ///
-/// Each test creates its own unique temp file and removes it in tearDown.
-/// Vnode delivery can take tens of ms; generous timeouts (1.5s) are used.
-/// The self-write suppression window is EditorTiming.selfWriteIgnoreInterval
-/// (1.5 s); the inverted expectation for that test uses 0.5 s so the test
-/// finishes before the window expires.
-@MainActor
+/// The class is intentionally NOT `@MainActor`: a `@MainActor` XCTestCase
+/// with an async `setUp()`/`tearDown()` that awaits `super` trips Xcode
+/// 16's "sending main-actor XCTestCase to a nonisolated context" check.
+/// Instead each test is marked `@MainActor` (FileWatcher is `@MainActor`)
+/// and builds its own fixture with `defer` cleanup — no shared setUp.
 final class FileWatcherTests: XCTestCase {
 
-    private var watcher: FileWatcher!
-    private var tempURL: URL!
-
-    override func setUp() async throws {
-        try await super.setUp()
-        watcher = FileWatcher()
-        // Unique file per test instance to avoid cross-test interference.
-        let name = UUID().uuidString + ".md"
-        tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(name)
-        // Create an initial file so O_EVTONLY can open it.
-        try "initial content\n".write(to: tempURL, atomically: true, encoding: .utf8)
+    /// Create a watcher + a unique temp file seeded with initial content
+    /// (so O_EVTONLY can open it). Caller is responsible for stop +
+    /// removeItem (via `defer`).
+    @MainActor
+    private func makeFixture() throws -> (FileWatcher, URL) {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".md")
+        try "initial content\n".write(to: url, atomically: true, encoding: .utf8)
+        return (FileWatcher(), url)
     }
 
-    override func tearDown() async throws {
-        watcher.stop()
-        watcher = nil
-        if let url = tempURL {
-            try? FileManager.default.removeItem(at: url)
-            tempURL = nil
-        }
-        try await super.tearDown()
-    }
-
-    /// Append bytes to the watched file IN PLACE (same inode), so the
-    /// vnode source sees a `.write`/`.extend` event → `.modified`. A
-    /// `String.write(atomically: true)` would instead swap the inode via
-    /// a temp-file rename, firing `.rename`/`.delete` (`.renamedOrDeleted`)
-    /// — which is not what these "content changed" tests intend.
+    /// Append bytes IN PLACE (same inode) so the vnode source sees a
+    /// `.write`/`.extend` event → `.modified`. `String.write(atomically:)`
+    /// would swap the inode via a rename and fire `.renamedOrDeleted`.
     private func appendInPlace(_ text: String, to url: URL) throws {
         let handle = try FileHandle(forWritingTo: url)
         defer { try? handle.close() }
@@ -48,100 +32,75 @@ final class FileWatcherTests: XCTestCase {
         try handle.write(contentsOf: Data(text.utf8))
     }
 
-    // MARK: - testExternalWriteFiresModified
-
-    /// Writing new bytes to the watched file from an external process
-    /// (simulated via FileManager here, without noteSelfWrite()) must fire
-    /// `.modified` through `onExternalChange`.
+    @MainActor
     func testExternalWriteFiresModified() throws {
-        let expectation = expectation(description: "onExternalChange fires .modified")
+        let (watcher, url) = try makeFixture()
+        defer { watcher.stop(); try? FileManager.default.removeItem(at: url) }
 
-        watcher.startWatching(tempURL)
+        let fired = expectation(description: "onExternalChange fires .modified")
+        watcher.startWatching(url)
         watcher.onExternalChange = { event in
-            if case .modified = event {
-                expectation.fulfill()
-            }
+            if case .modified = event { fired.fulfill() }
         }
-
-        // Write without calling noteSelfWrite() — simulates an external change.
-        try appendInPlace("updated content\n", to: tempURL)
-
-        wait(for: [expectation], timeout: 1.5)
+        try appendInPlace("updated content\n", to: url)
+        wait(for: [fired], timeout: 1.5)
     }
 
-    // MARK: - testSelfWriteIsSuppressed
-
-    /// After `noteSelfWrite()` is called, a write within the ignore window
-    /// must NOT produce an `onExternalChange` callback. Uses an inverted
-    /// expectation with a 0.5 s timeout (well within the 1.5 s window).
+    @MainActor
     func testSelfWriteIsSuppressed() throws {
-        let noEvent = expectation(description: "NO event should arrive after noteSelfWrite")
+        let (watcher, url) = try makeFixture()
+        defer { watcher.stop(); try? FileManager.default.removeItem(at: url) }
+
+        let noEvent = expectation(description: "NO event after noteSelfWrite")
         noEvent.isInverted = true
+        watcher.startWatching(url)
+        watcher.onExternalChange = { _ in noEvent.fulfill() }
 
-        watcher.startWatching(tempURL)
-        watcher.onExternalChange = { _ in
-            noEvent.fulfill()   // fulfill = test failure (inverted)
-        }
-
-        // Record a self-write synchronously, then write the file in place
-        // (a real `.write` event the suppression window must swallow).
         watcher.noteSelfWrite()
-        try appendInPlace("self-written content\n", to: tempURL)
-
-        // Wait 0.5 s — inside the 1.5 s suppression window.
-        wait(for: [noEvent], timeout: 0.5)
+        try appendInPlace("self-written content\n", to: url)
+        wait(for: [noEvent], timeout: 0.5)   // inside the 1.5s suppression window
     }
 
-    // MARK: - testDeleteFiresRenamedOrDeleted
-
-    /// Removing the watched file must fire `.renamedOrDeleted`.
+    @MainActor
     func testDeleteFiresRenamedOrDeleted() throws {
-        let expectation = expectation(description: "onExternalChange fires .renamedOrDeleted")
+        let (watcher, url) = try makeFixture()
+        defer { watcher.stop(); try? FileManager.default.removeItem(at: url) }
 
-        watcher.startWatching(tempURL)
+        let fired = expectation(description: "onExternalChange fires .renamedOrDeleted")
+        watcher.startWatching(url)
         watcher.onExternalChange = { event in
-            if case .renamedOrDeleted = event {
-                expectation.fulfill()
-            }
+            if case .renamedOrDeleted = event { fired.fulfill() }
+        }
+        try FileManager.default.removeItem(at: url)
+        wait(for: [fired], timeout: 1.5)
+    }
+
+    @MainActor
+    func testStopClearsCurrentURL() throws {
+        let (watcher, url) = try makeFixture()
+        defer { watcher.stop(); try? FileManager.default.removeItem(at: url) }
+
+        watcher.startWatching(url)
+        XCTAssertEqual(watcher.currentURL, url, "currentURL set after startWatching")
+        watcher.stop()
+        XCTAssertNil(watcher.currentURL, "currentURL nil after stop()")
+    }
+
+    @MainActor
+    func testStartOverStartReplacesURL() throws {
+        let (watcher, urlA) = try makeFixture()
+        let urlB = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString + ".md")
+        try "second file\n".write(to: urlB, atomically: true, encoding: .utf8)
+        defer {
+            watcher.stop()
+            try? FileManager.default.removeItem(at: urlA)
+            try? FileManager.default.removeItem(at: urlB)
         }
 
-        try FileManager.default.removeItem(at: tempURL)
-
-        wait(for: [expectation], timeout: 1.5)
-    }
-
-    // MARK: - testStopClearsCurrentURL
-
-    /// `currentURL` must equal the watched URL after `startWatching`, and
-    /// must be `nil` after `stop()`.
-    func testStopClearsCurrentURL() {
-        watcher.startWatching(tempURL)
-        XCTAssertEqual(watcher.currentURL, tempURL,
-                       "currentURL must be set after startWatching")
-
-        watcher.stop()
-        XCTAssertNil(watcher.currentURL,
-                     "currentURL must be nil after stop()")
-    }
-
-    // MARK: - testStartOverStartReplacesURL
-
-    /// Calling `startWatching` a second time (with a different URL) must
-    /// replace the previous watch; `currentURL` must reflect the new URL.
-    func testStartOverStartReplacesURL() throws {
-        // Create a second temp file.
-        let nameB = UUID().uuidString + ".md"
-        let urlB = FileManager.default.temporaryDirectory
-            .appendingPathComponent(nameB)
-        try "second file\n".write(to: urlB, atomically: true, encoding: .utf8)
-        defer { try? FileManager.default.removeItem(at: urlB) }
-
-        watcher.startWatching(tempURL)
-        XCTAssertEqual(watcher.currentURL, tempURL,
-                       "currentURL must equal the first URL after first startWatching")
-
+        watcher.startWatching(urlA)
+        XCTAssertEqual(watcher.currentURL, urlA)
         watcher.startWatching(urlB)
-        XCTAssertEqual(watcher.currentURL, urlB,
-                       "currentURL must equal the second URL after second startWatching")
+        XCTAssertEqual(watcher.currentURL, urlB, "second startWatching replaces the URL")
     }
 }
