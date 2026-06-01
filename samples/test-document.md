@@ -31,9 +31,14 @@ Ordered:
 Footnote
 
 Tasks:
-- [x] Done thing
-- [ ] Open thing
+- [ ] Done thing — should be struck through and dimmed
+- [ ] Open thing — should show empty box
 - [ ] Another open thing
+- [ ] Uppercase X also counts as checked
+* [x] Star bullet works too
++ [ ] Plus bullet works too
+  - [ ] Indented unchecked item
+  - [x] Indented checked item
 
 ## Blockquote
 

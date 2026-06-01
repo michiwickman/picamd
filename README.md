@@ -34,6 +34,11 @@ server, themes, export) is built on top.
   (offline-bundled), **Mermaid diagrams** (downloaded on first
   use). A lazy webview pool caps `WKWebView` instances at 12 so
   RAM stays bounded on long docs.
+- **Interactive task-list checkboxes** — `- [ ]` and `- [x]`
+  render as native AppKit checkboxes drawn in your accent
+  colour. Click to toggle (Undo-tracked). Checked items strike
+  through automatically. Cursor on the line restores the raw
+  `[ ]` / `[x]` markup so you can edit it directly.
 - Outline sidebar with cursor auto-tracking. Frontmatter bar with
   title + tag chips. Footnote tooltips on `[^id]` hover.
 - **Tabs** (`⌘T`), **Focus mode** (`⌃⌘F`), **Typewriter mode**
@@ -214,7 +219,7 @@ PicaMD/
 ## Bundle stats
 
 - **9.8 MB** Release bundle (incl. embedded Sparkle.framework).
-- 184 unit tests. CI runs both bundles on `macos-15` /
+- 197 unit tests. CI runs both bundles on `macos-15` /
   Xcode 16 with Swift 6 strict concurrency.
 - Linked: only Apple system frameworks + `Sparkle.framework`
   for auto-update. No other third-party dynamic libraries.

@@ -4,6 +4,87 @@ All notable changes to PicaMD are documented here. Format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), versioning
 is [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- **Interactive task-list checkboxes**. `- [ ]` and `- [x]` now
+  render as native AppKit checkboxes drawn in the editor's accent
+  colour. Click to toggle — the source `[ ]` ↔ `[x]` flip goes
+  through `NSTextStorage` so undo works. Checked items get a
+  strike-through + dimmed colour on the trailing prose. Cursor
+  on the line restores the raw markup for direct editing,
+  matching the existing concealment idiom for every other inline
+  syntax token. Same UX as Obsidian's Live Preview, native AppKit
+  instead of CodeMirror decorations. 13 unit tests.
+- **Create New File from launch open panel**. The cold-launch open
+  dialog now has a **Create New File…** button next to Cancel /
+  Open. One click opens a save panel pre-navigated to the folder
+  the open dialog was browsing, you pick a name + location, the
+  empty `.md` is created and opened in the editor. Same option is
+  available when the dock icon is double-clicked with no open
+  documents.
+
+### Security
+
+- **MCP sidecar is now scoped to open documents.** The `document.*`
+  tools previously read/wrote any path the caller passed; a
+  prompt-injection block in an opened doc could exfiltrate
+  `~/.ssh/id_rsa` or overwrite `~/.zshrc`. Paths are now canonicalised
+  and rejected unless they match a document actually open in PicaMD.
+- **Math/Mermaid blocks no longer execute injected scripts.** A `$$…$$`
+  or ```` ```mermaid ```` block containing `</script>` could break out
+  of the render WebView's script element and run arbitrary JS. The
+  source is now escaped against `</` end-tag detection.
+- **Mermaid renders with `securityLevel: 'strict'`** (was `'loose'`),
+  running diagram labels through DOMPurify and blocking `<script>` /
+  `onerror` / `javascript:` payloads in diagram source.
+- **AI endpoints are restricted to http/https** — `file://` and other
+  schemes are rejected.
+- **HTML pass-through is sanitised** before it reaches the Quick-Look
+  preview or an exported `.html`: `<script>`/`<style>`/`<iframe>`/
+  `<object>`/`<embed>`, `on*=` handlers, and `javascript:` URLs are
+  stripped. Previously raw doc HTML executed verbatim in the export.
+- **MCP write tools carry destructive-action annotations** so MCP
+  hosts can prompt before `replaceLines`/`appendText`; read tools are
+  marked read-only. Malformed JSON-RPC frames now return a `-32700`
+  parse error instead of leaving the client hanging.
+- The Services-menu handler writes its scratch file to a fresh
+  symlink-safe item-replacement directory (was a predictable temp path).
+
+### Fixed
+
+- Mermaid CDN download now validates HTTP status, size, and content
+  type before caching — a 503 error page or captive-portal redirect
+  no longer poisons the cache permanently.
+- The Mermaid online-fallback CDN version is back in lockstep with the
+  cached version (was pinned at 10.9.1 while the cache fetched 11.14.0).
+- `FileWatcher`'s self-write detection is recorded synchronously on the
+  save queue, closing a race where the app's own save could surface as
+  a spurious "file changed on disk" alert.
+- The MCP active-documents registry now unregisters on window close and
+  on Save-As, so the sidecar no longer reports stale/closed documents.
+- Clickable task-list checkboxes are suppressed inside fenced code and
+  math blocks, stay concealed off-viewport, and reject a stale click
+  (after fast typing or an external reload) instead of corrupting text.
+- Task-list extraction runs once per highlight pass and reuses a
+  compiled regex (was extracted twice and recompiled each time).
+- Editor font-size setting now scales headings, code, tables and math
+  too (they were pinned to a separate hard-coded base size).
+- Inline checkbox overlays reuse an indexed view pool instead of
+  tearing down and rebuilding every checkbox on each keystroke.
+- `MCP document.replaceLines` rejects a `start` past end-of-file
+  instead of silently appending.
+- Corrupt persisted theme JSON is logged and backed up (was silently
+  reset); Mermaid downloads validate status/size/SHA-pin slot before
+  caching and write with `0600` perms.
+- WebView-backed math/mermaid blocks stop loading and delete their
+  staged HTML on teardown (cache no longer grows unbounded).
+- Task checkboxes are VoiceOver-accessible (checkbox role + Space to
+  toggle); image/math/mermaid overlays expose their alt text/source.
+- The cold-launch open panel is suppressed under XCTest so the test
+  host can't hang on a modal dialog.
+
 ## [0.8.0-alpha] — 2026-05-07
 
 First public release.
