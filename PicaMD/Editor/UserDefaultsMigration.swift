@@ -46,6 +46,12 @@ enum UserDefaultsMigration {
         guard !defaults.bool(forKey: markerKey) else { return }
         defer { defaults.set(true, forKey: markerKey) }
 
+        // API keys live in the Keychain, not the plist — migrate them
+        // first and independently, so a missing/unreadable QuickMD plist
+        // (the early-return below) doesn't strand the user's keys under
+        // the old service, forcing them to re-paste every key.
+        migrateKeychainFromQuickMD()
+
         // UserDefaults are scoped per bundle identifier. The rename
         // changed the identifier from `de.michaelwittmann.QuickMD` to
         // `de.michaelwittmann.PicaMD`, so PicaMD's `.standard` no
@@ -75,5 +81,21 @@ enum UserDefaultsMigration {
         // is gone but the user might still want their old settings
         // around for reference / re-import / Time Machine purposes.
         // The migration marker prevents us from re-applying them.
+    }
+
+    /// Copy each provider's API key from the old QuickMD keychain
+    /// (service + account both carried the `QuickMD` prefix) into the
+    /// new PicaMD entries. Never overwrites a key the user has already
+    /// set on the new bundle.
+    private static func migrateKeychainFromQuickMD() {
+        let oldService = "de.michaelwittmann.QuickMD.ai"
+        for provider in AIProvider.allCases {
+            let newAccount = provider.keychainAccount            // PicaMD.ai.<p>.apiKey
+            guard Keychain.get(account: newAccount) == nil else { continue }
+            let oldAccount = "QuickMD.ai.\(provider.rawValue).apiKey"
+            if let key = Keychain.value(forService: oldService, account: oldAccount) {
+                Keychain.set(value: key, account: newAccount)
+            }
+        }
     }
 }

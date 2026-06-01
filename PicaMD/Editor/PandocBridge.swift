@@ -128,7 +128,7 @@ enum PandocBridge {
         let stderrPipe = Pipe()
         process.standardInput = stdinPipe
         process.standardError = stderrPipe
-        process.standardOutput = Pipe()   // discarded — `-o` writes directly
+        process.standardOutput = FileHandle.nullDevice   // discarded — `-o` writes directly
 
         do {
             try process.run()
@@ -137,10 +137,14 @@ enum PandocBridge {
         }
 
         // Feed the source to pandoc's stdin in one go.
-        if let data = source.data(using: .utf8) {
-            try? stdinPipe.fileHandleForWriting.write(contentsOf: data)
+        do {
+            if let data = source.data(using: .utf8) {
+                try stdinPipe.fileHandleForWriting.write(contentsOf: data)
+            }
+            try stdinPipe.fileHandleForWriting.close()
+        } catch {
+            NSLog("PicaMD: pandoc stdin write failed: \(error)")
         }
-        try? stdinPipe.fileHandleForWriting.close()
 
         process.waitUntilExit()
 

@@ -66,4 +66,26 @@ enum Keychain {
         ]
         SecItemDelete(query as CFDictionary)
     }
+
+    /// Read a value from an explicit service identifier. Used by the
+    /// QuickMD→PicaMD migration to reach API keys stored under the old
+    /// service (`de.michaelwittmann.QuickMD.ai`); normal code paths use
+    /// `get(account:)` which targets the current `service`.
+    static func value(forService service: String, account: String) -> String? {
+        let query: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String:  true,
+            kSecMatchLimit as String:  kSecMatchLimitOne,
+        ]
+        var result: AnyObject?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        guard status == errSecSuccess,
+              let data = result as? Data,
+              let string = String(data: data, encoding: .utf8) else {
+            return nil
+        }
+        return string
+    }
 }

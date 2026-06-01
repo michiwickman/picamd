@@ -79,6 +79,17 @@ final class ThemeStore: ObservableObject {
 
     private static func load(defaults: UserDefaults, key: String) -> EditorTheme? {
         guard let data = defaults.data(forKey: key) else { return nil }
-        return try? JSONDecoder().decode(EditorTheme.self, from: data)
+        do {
+            return try JSONDecoder().decode(EditorTheme.self, from: data)
+        } catch {
+            NSLog("PicaMD: theme JSON corrupt, falling back to default: \(error)")
+            // Preserve the first bad blob for forensics; never clobber a
+            // previously saved backup so the original corrupt data survives.
+            let backupKey = "\(key).corrupt-backup"
+            if defaults.data(forKey: backupKey) == nil {
+                defaults.set(data, forKey: backupKey)
+            }
+            return nil
+        }
     }
 }

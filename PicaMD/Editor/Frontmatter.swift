@@ -47,13 +47,11 @@ struct Frontmatter: Equatable {
 
     // MARK: - Build
 
-    /// Parse the leading frontmatter, if any. Order of operations:
-    /// 1. Detect the fenced block via the same regex the highlighter
-    ///    uses (`\A---\n[\s\S]*?\n---\n`).
-    /// 2. Walk lines between the fences, classifying each as scalar,
-    ///    inline-array, or list-item-belonging-to-previous-key.
-    static func build(from source: String) -> Frontmatter {
-        let nsSource = source as NSString
+    // Compiled once at type-load time. Using `try!` here is intentional:
+    // a regex syntax error is a programmer error caught at startup, not a
+    // recoverable runtime condition. This follows the SyntaxHighlighter
+    // convention for static regex constants.
+    private static let fenceRegex: NSRegularExpression = {
         // Match the fenced block. The highlighter's regex demands a
         // trailing `\n` after the closing `---`, but we want to also
         // accept end-of-document (so a doc that's *just* frontmatter,
@@ -63,13 +61,19 @@ struct Frontmatter: Equatable {
         // `\n?` between the body and the closing fence handles the
         // empty-block case (`---\n---\n`) where there is no body — the
         // separator newline collapses too.
-        let frontmatterRegex = try? NSRegularExpression(
-            pattern: #"\A---\n([\s\S]*?)\n?---(?:\n|$)"#
-        )
-        guard let regex = frontmatterRegex,
-              let match = regex.firstMatch(in: source,
-                                            options: [],
-                                            range: NSRange(location: 0, length: nsSource.length))
+        try! NSRegularExpression(pattern: #"\A---\n([\s\S]*?)\n?---(?:\n|$)"#)
+    }()
+
+    /// Parse the leading frontmatter, if any. Order of operations:
+    /// 1. Detect the fenced block via the same regex the highlighter
+    ///    uses (`\A---\n[\s\S]*?\n---\n`).
+    /// 2. Walk lines between the fences, classifying each as scalar,
+    ///    inline-array, or list-item-belonging-to-previous-key.
+    static func build(from source: String) -> Frontmatter {
+        let nsSource = source as NSString
+        guard let match = Self.fenceRegex.firstMatch(in: source,
+                                                     options: [],
+                                                     range: NSRange(location: 0, length: nsSource.length))
         else {
             return .empty
         }

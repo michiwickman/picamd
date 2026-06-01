@@ -26,15 +26,18 @@ final class ServicesProvider: NSObject {
             // DocumentGroup creates a normal PicaMD window for it,
             // tabs join the active group, all the editor wiring lights
             // up — same shape as opening any other .md.
-            let baseDir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("PicaMD-services", isDirectory: true)
-            try FileManager.default.createDirectory(at: baseDir,
-                                                     withIntermediateDirectories: true)
-            // Short timestamp keeps multiple drops in quick succession
-            // from clobbering each other AND lets the user tell them
-            // apart.
-            let stamp = filenameSafeStamp(for: Date())
-            let tempURL = baseDir.appendingPathComponent("Selection-\(stamp).md")
+            // Use a guaranteed-fresh, non-symlinked working directory to
+            // avoid TOCTOU / symlink-planting on the predictable path.
+            // `itemReplacementDirectory` always returns a new unique dir
+            // beneath the system temp hierarchy for the given volume.
+            let appropriateFor = FileManager.default.temporaryDirectory
+            let baseDir = try FileManager.default.url(
+                for: .itemReplacementDirectory,
+                in: .userDomainMask,
+                appropriateFor: appropriateFor,
+                create: true)
+            // UUID filename prevents any predictable-name collision.
+            let tempURL = baseDir.appendingPathComponent("Selection-\(UUID().uuidString).md")
             try text.write(to: tempURL, atomically: true, encoding: .utf8)
             NSWorkspace.shared.open(tempURL)
         } catch let writeError {
