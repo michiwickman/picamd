@@ -16,14 +16,17 @@ final class KeychainTests: XCTestCase {
     // Unique per-run suffix so parallel test runs can't collide.
     private var runID: String!
 
-    override func setUp() {
-        super.setUp()
+    // `async throws` overrides so they run on the main actor (this class
+    // is @MainActor) — the synchronous setUp()/tearDown() overrides are
+    // nonisolated under Swift 6 / Xcode 16 and can't mutate `runID`.
+    override func setUp() async throws {
+        try await super.setUp()
         runID = UUID().uuidString
     }
 
-    override func tearDown() {
+    override func tearDown() async throws {
         runID = nil
-        super.tearDown()
+        try await super.tearDown()
     }
 
     // MARK: - Helpers
