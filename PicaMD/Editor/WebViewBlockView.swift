@@ -33,19 +33,28 @@ class WebViewBlockView: BlockAttachmentView {
     required init?(coder: NSCoder) { fatalError() }
 
     deinit {
-        // Belt-and-braces: stop any in-flight load so the WebContent
-        // process is not kept alive past eviction.
-        webView.stopLoading()
-        webView.navigationDelegate = nil
-        // removeAllScriptMessageHandlers() is macOS 14+; always true for
-        // our deployment target, but guard against accidental backport.
-        if #available(macOS 14.0, *) {
-            webView.configuration.userContentController.removeAllScriptMessageHandlers()
-        }
-        // Clean up the staged HTML file to prevent monotonic cache growth.
+        // NOTE: a `@MainActor` class's `deinit` is *nonisolated* under
+        // Swift 6, so it may NOT touch the main-actor-isolated WKWebView
+        // here (Xcode 16 rejects it). The WebView teardown lives in the
+        // main-actor `tearDownWebView()` below, which the owning
+        // BlockOverlayManager calls before it drops the view. ARC also
+        // tears the WKWebView down when this view deallocates.
+        //
+        // Deleting the staged HTML file IS nonisolated-safe (FileManager
+        // is thread-safe and `stagedFileURL` is a plain stored property).
         if let url = stagedFileURL {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    /// Stop any in-flight load and detach handlers so the WebContent
+    /// process isn't kept alive past eviction. Must be called on the
+    /// main actor (the owning manager is `@MainActor`) BEFORE the view is
+    /// removed/released — `deinit` can't do this under Swift 6.
+    func tearDownWebView() {
+        webView.stopLoading()
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeAllScriptMessageHandlers()
     }
 
     override func setupContent() {

@@ -142,6 +142,7 @@ final class BlockOverlayManager {
         // Remove views for identities that disappeared this pass.
         let presentIDs = Set(ids)
         for (id, entry) in entries where !presentIDs.contains(id) {
+            (entry.view as? WebViewBlockView)?.tearDownWebView()
             entry.view.removeFromSuperview()
             entries.removeValue(forKey: id)
             blockHeights.removeValue(forKey: id)
@@ -162,6 +163,7 @@ final class BlockOverlayManager {
                 || (isRealKind && isPlaceholder)
                 || (!isRealKind && existing != nil && !isPlaceholder)
             if needsRecreation {
+                (existing as? WebViewBlockView)?.tearDownWebView()
                 existing?.removeFromSuperview()
                 let v: BlockAttachmentView
                 if isRealKind {
@@ -235,6 +237,7 @@ final class BlockOverlayManager {
     /// Forget all overlays (e.g. when the document changes drastically).
     func clear() {
         for (_, entry) in entries {
+            (entry.view as? WebViewBlockView)?.tearDownWebView()
             entry.view.removeFromSuperview()
         }
         entries.removeAll()
