@@ -174,4 +174,58 @@ final class ThemeTests: XCTestCase {
         store.resetToDefault()
         XCTAssertEqual(store.theme, .default)
     }
+
+    // MARK: GAP-06 – Corruption recovery, palette mirror, change notification
+
+    func testThemeStoreFallsBackToDefaultOnCorruptBlob() {
+        let defaults = makeIsolatedDefaults()
+        let garbageData = Data("garbage".utf8)
+        defaults.set(garbageData, forKey: "PicaMD.editorTheme.v1")
+
+        let store = ThemeStore(defaults: defaults)
+
+        XCTAssertEqual(store.theme, .default,
+            "ThemeStore must fall back to .default when persisted JSON is corrupt")
+    }
+
+    func testCorruptBlobIsBackedUp() {
+        let defaults = makeIsolatedDefaults()
+        let garbageData = Data("garbage".utf8)
+        defaults.set(garbageData, forKey: "PicaMD.editorTheme.v1")
+
+        _ = ThemeStore(defaults: defaults)
+
+        let backup = defaults.data(forKey: "PicaMD.editorTheme.v1.corrupt-backup")
+        XCTAssertNotNil(backup,
+            "Corrupt blob must be stashed under the .corrupt-backup key")
+        XCTAssertEqual(backup, garbageData,
+            "The backed-up bytes must match the original corrupt blob exactly")
+    }
+
+    func testCurrentPaletteMirrorTracksMutations() {
+        let store = ThemeStore(defaults: makeIsolatedDefaults())
+
+        store.setPalette(.oled)
+
+        // Compare by the canonical OLED bg hex – same approach used in the
+        // existing palette-hex tests above.
+        XCTAssertEqual(ThemeStore.currentPalette.bg.toHex(), Palette.oled.bg.toHex(),
+            "currentPalette.bg must reflect the OLED palette after setPalette(.oled)")
+    }
+
+    func testUpdatePostsThemeChangedNotification() {
+        let store = ThemeStore(defaults: makeIsolatedDefaults())
+
+        // Make sure the accent actually differs from the default (.system)
+        // so the update(_:) no-op guard does not suppress the post.
+        let expectation = expectation(
+            forNotification: ThemeStore.themeChangedNotification,
+            object: nil,
+            handler: nil
+        )
+
+        store.setAccent(.pink)
+
+        wait(for: [expectation], timeout: 1.0)
+    }
 }
