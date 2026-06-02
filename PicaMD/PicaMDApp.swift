@@ -6,10 +6,8 @@ struct PicaMDApp: App {
     @StateObject private var themeStore = ThemeStore()
     @StateObject private var updater = UpdaterController()
 
-    /// Hook into the launch-time "no document open" path so we can
-    /// present our own NSOpenPanel that carries the **Create New File…**
-    /// accessoryView. SwiftUI's DocumentGroup default panel bypasses
-    /// NSDocumentController and would ignore our subclass's hooks.
+    /// Hooks the launch-time "no document open" path to present the
+    /// welcome window (recents + New + Open) instead of a Finder panel.
     @NSApplicationDelegateAdaptor(PicaMDAppDelegate.self) private var appDelegate
 
     /// Long-lived ServicesProvider instance. Stored on the App so it
@@ -24,9 +22,16 @@ struct PicaMDApp: App {
         // `PlatformDocumentController` subclass and expects to be the
         // shared singleton; pre-empting it crashes during launch in
         // `PlatformDocumentController.createDocumentClassIfNeeded`.
-        // The launch-time "Create New File…" affordance lives in
-        // `PicaMDAppDelegate.applicationOpenUntitledFile`, which
-        // builds an `NSOpenPanel` directly without subclassing.
+
+        // Suppress AppKit's automatic "open panel on launch" for document
+        // apps. Without this, DocumentGroup pops a Finder open panel at
+        // cold launch (behind our welcome window). With it false, the
+        // launch routes through the untitled-file path, which our
+        // `PicaMDAppDelegate` intercepts to show the welcome window.
+        // Registered in the volatile domain (per-launch, not persisted).
+        UserDefaults.standard.register(defaults: [
+            "NSShowAppCentricOpenPanelInsteadOfUntitledFile": false
+        ])
 
         // Migrate UserDefaults from the QuickMD-era namespace before
         // anything else reads from defaults. `@StateObject` initialises

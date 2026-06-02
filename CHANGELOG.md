@@ -6,6 +6,18 @@ is [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Changed
+
+- **Welcome window on launch** (replaces the Finder open panel). Double-
+  clicking PicaMD now opens a hub with a **New Document** button, an
+  **Open Document…** button, and a **Recently Opened** list (filename +
+  path, click to open, with Clear) — instead of forcing you through a
+  Finder dialog. New documents are untitled / in-memory until the first
+  ⌘S. Opening a file directly (Finder, recents, Open…) skips the hub;
+  the hub reappears on a bare launch or a dock-click with no windows.
+  Recents are tracked by PicaMD itself (DocumentGroup doesn't maintain
+  `NSDocumentController.recentDocumentURLs`).
+
 ### Added
 
 - **Interactive task-list checkboxes**. `- [ ]` and `- [x]` now

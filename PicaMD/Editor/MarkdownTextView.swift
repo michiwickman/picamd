@@ -644,6 +644,9 @@ struct MarkdownTextView: NSViewRepresentable {
                 // `workspace.openDocuments` tool result so Claude Code
                 // can read/search/edit it through MCP.
                 ActiveDocumentsRegistry.shared.register(url: url)
+                // Record for the welcome window's recents list (DocumentGroup
+                // doesn't maintain NSDocumentController.recentDocumentURLs).
+                RecentDocumentsStore.add(url)
                 installWindowCloseObserverIfNeeded(for: textView)
             }
 

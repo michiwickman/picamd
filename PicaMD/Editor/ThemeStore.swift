@@ -19,6 +19,13 @@ final class ThemeStore: ObservableObject {
     /// the compiler, not actual unsafety.
     nonisolated(unsafe) static var currentPalette: Palette = EditorTheme.default.palette
 
+    /// The user's *effective* accent colour (palette default unless the
+    /// user picked an explicit AccentChoice). Mirrored here so AppKit-
+    /// hosted chrome outside the SwiftUI scene — e.g. the welcome window —
+    /// can tint itself with the user's accent. Updated in lockstep with
+    /// `currentPalette`.
+    nonisolated(unsafe) static var currentAccent: NSColor = EditorTheme.default.effectiveAccent
+
     /// Posted whenever `theme` changes. AppKit block views subscribe
     /// here and call `appearanceChanged()` so their WKWebView HTML
     /// reloads with the new palette colours.
@@ -29,6 +36,7 @@ final class ThemeStore: ObservableObject {
         self.theme = Self.load(defaults: defaults, key: defaultsKey)
             ?? EditorTheme.default
         Self.currentPalette = self.theme.palette
+        Self.currentAccent = self.theme.effectiveAccent
     }
 
     private let defaults: UserDefaults
@@ -40,6 +48,7 @@ final class ThemeStore: ObservableObject {
         guard next != theme else { return }
         theme = next
         Self.currentPalette = next.palette
+        Self.currentAccent = next.effectiveAccent
         NotificationCenter.default.post(name: Self.themeChangedNotification, object: nil)
         save()
     }
