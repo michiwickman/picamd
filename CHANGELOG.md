@@ -8,6 +8,10 @@ is [SemVer](https://semver.org/).
 
 ### Changed
 
+- **Table cells wrap by default.** Rendered Markdown tables now word-wrap
+  long cell content onto multiple lines (rows grow to fit) instead of
+  truncating it with an ellipsis, so wide tables are readable without
+  widening columns.
 - **Welcome window on launch** (replaces the Finder open panel). Double-
   clicking PicaMD now opens a hub with a **New Document** button, an
   **Open Document…** button, and a **Recently Opened** list (filename +
