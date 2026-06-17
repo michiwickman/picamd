@@ -21,6 +21,30 @@ final class PicaMDTextView: NSTextView {
     /// Master toggle for auto-pairing brackets/quotes. Defaults to `true`.
     var autoPairEnabled: Bool = true
 
+    // MARK: - Find-bar match highlighting
+
+    /// Match ranges from the find bar, in document order. Drawn as
+    /// translucent rounded rects ON TOP of the glyphs in `draw(_:)` so
+    /// they stay visible regardless of any concealed markup or attribute
+    /// backgrounds (inline code, table rows) underneath. The coordinator
+    /// keeps these in sync with the `SearchModel`.
+    private var searchMatchRanges: [NSRange] = []
+    /// The currently-focused match — stronger fill + a solid border.
+    private var currentSearchMatch: NSRange?
+    /// Fill for non-current matches; set from the theme accent by the
+    /// coordinator. Translucent so the text reads through it.
+    var searchHighlightColor: NSColor = NSColor.systemYellow.withAlphaComponent(0.30)
+    /// Fill + border for the current match.
+    var currentSearchHighlightColor: NSColor = NSColor.systemOrange.withAlphaComponent(0.45)
+    var currentSearchBorderColor: NSColor = NSColor.systemOrange
+
+    /// Replace the highlighted match set and force a repaint.
+    func setSearchMatches(_ matches: [NSRange], current: NSRange?) {
+        searchMatchRanges = matches
+        currentSearchMatch = current
+        needsDisplay = true
+    }
+
     /// Loaded once at first instance; subsequent text views share the
     /// same map so a runtime keybindings.json edit takes effect on the
     /// next launch (we don't watch the file — `KeybindingLoader.load()`
@@ -62,6 +86,66 @@ final class PicaMDTextView: NSTextView {
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
         footnoteTooltip.hide()
+    }
+
+    // MARK: - Find-bar highlight drawing
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawSearchHighlights(in: dirtyRect)
+    }
+
+    /// Paint translucent rects over the current match set. Restricted to
+    /// the glyphs intersecting `dirtyRect`, and — since matches are in
+    /// document order — bailing out once we pass the dirty range, so a
+    /// document with thousands of matches still only does layout work for
+    /// the handful on screen.
+    private func drawSearchHighlights(in dirtyRect: NSRect) {
+        guard !searchMatchRanges.isEmpty,
+              let layoutManager = layoutManager,
+              let textContainer = textContainer,
+              let storage = textStorage else { return }
+        let total = storage.length
+        guard total > 0 else { return }
+        let origin = textContainerOrigin
+
+        // Character range covered by the area being drawn — used to skip
+        // off-screen matches before doing any per-match layout math.
+        let dirtyGlyphs = layoutManager.glyphRange(forBoundingRect: dirtyRect, in: textContainer)
+        let dirtyChars = layoutManager.characterRange(forGlyphRange: dirtyGlyphs, actualGlyphRange: nil)
+        let lo = dirtyChars.location
+        let hi = NSMaxRange(dirtyChars)
+
+        let notSelected = NSRange(location: NSNotFound, length: 0)
+
+        for match in searchMatchRanges {
+            guard match.length > 0, NSMaxRange(match) <= total else { continue }
+            if match.location > hi { break }            // sorted — nothing left on screen
+            if NSMaxRange(match) < lo { continue }       // before the dirty range
+            let isCurrent = currentSearchMatch.map { NSEqualRanges($0, match) } ?? false
+            let glyphRange = layoutManager.glyphRange(forCharacterRange: match, actualCharacterRange: nil)
+            let fill = isCurrent ? currentSearchHighlightColor : searchHighlightColor
+
+            layoutManager.enumerateEnclosingRects(
+                forGlyphRange: glyphRange,
+                withinSelectedGlyphRange: notSelected,
+                in: textContainer
+            ) { r, _ in
+                var hr = r
+                hr.origin.x += origin.x
+                hr.origin.y += origin.y
+                hr = hr.insetBy(dx: -1, dy: 0.5)
+                guard hr.intersects(dirtyRect) else { return }
+                let path = NSBezierPath(roundedRect: hr, xRadius: 2.5, yRadius: 2.5)
+                fill.setFill()
+                path.fill()
+                if isCurrent {
+                    self.currentSearchBorderColor.setStroke()
+                    path.lineWidth = 1
+                    path.stroke()
+                }
+            }
+        }
     }
 
     private func registerForImageDrops() {

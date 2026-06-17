@@ -13,6 +13,9 @@ struct ContentView: View {
     @SceneStorage("PicaMD.focusMode") private var focusMode: Bool = false
     @SceneStorage("PicaMD.typewriterMode") private var typewriterMode: Bool = false
     @State private var commandPaletteOpen: Bool = false
+    /// Find/replace bar state for this window. Published to the Find
+    /// command menu via `.focusedSceneValue(\.searchModel, …)`.
+    @StateObject private var search = SearchModel()
     /// Updated whenever the WindowAccessor's window's representedURL
     /// changes — i.e. every time the user saves an Untitled doc or
     /// opens a fresh file. Used to provide the suggested export
@@ -49,6 +52,7 @@ struct ContentView: View {
         .focusedSceneValue(\.focusModeBinding, $focusMode)
         .focusedSceneValue(\.typewriterModeBinding, $typewriterMode)
         .focusedSceneValue(\.commandPaletteBinding, $commandPaletteOpen)
+        .focusedSceneValue(\.searchModel, search)
         // Publish a snapshot of the active doc's source + URL +
         // palette so the File menu's Export commands can read them.
         .focusedSceneValue(\.activeDocumentContext, ActiveDocumentContext(
@@ -119,19 +123,28 @@ struct ContentView: View {
                                        cursorLocation: $cursorLocation,
                                        theme: theme,
                                        focusMode: focusMode,
-                                       typewriterMode: typewriterMode)
-        if theme.preset == .tahoe {
-            editor
-                .background(Color(theme.palette.bg))
-                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 12, style: .continuous)
-                        .stroke(Color(theme.palette.rule), lineWidth: 1)
-                )
-                .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
-                .background(Color(theme.palette.bgTint))
-        } else {
-            editor
+                                       typewriterMode: typewriterMode,
+                                       search: search)
+        Group {
+            if theme.preset == .tahoe {
+                editor
+                    .background(Color(theme.palette.bg))
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .stroke(Color(theme.palette.rule), lineWidth: 1)
+                    )
+                    .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
+                    .background(Color(theme.palette.bgTint))
+            } else {
+                editor
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if search.isOpen {
+                SearchBarView(model: search)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+            }
         }
     }
 

@@ -24,6 +24,24 @@ is [SemVer](https://semver.org/).
 
 ### Added
 
+- **Markdown-aware Find & Replace** (`⌘F`). A custom in-editor find bar
+  replaces the stock `NSTextView` find bar, which couldn't see through the
+  editor's marker concealment. Matches are drawn as translucent,
+  accent-tinted highlights painted on top of the glyphs, so they stay
+  visible even where they cross concealed `**`/`_`/`` ` `` markup; the
+  current match gets a bordered highlight and is scrolled into view.
+  - Live "n von m" counter, `⌘G` / `⇧⌘G` to cycle matches, `⌘E` to search
+    the selection, Esc to close.
+  - Toggles for **case-sensitive**, **whole-word**, and **regex** (with an
+    invalid-pattern indicator).
+  - **Ignore-formatting** search (the Markdown-aware mode): matches against
+    the rendered/visible text, so `bold word` finds `**bold**·word` even
+    though the `**` markers split it in the source. Strips inline emphasis,
+    code, strike, highlight, headings, blockquotes and collapses links to
+    their text; fenced-code bodies are searched verbatim.
+  - **Find & Replace** (`⌘⌥F`): Replace / Replace All, regex `$1` capture
+    templates, single undo step for Replace All. (Replace is disabled while
+    ignore-formatting is on — there's no single source span to substitute.)
 - **Interactive task-list checkboxes**. `- [ ]` and `- [x]` now
   render as native AppKit checkboxes drawn in the editor's accent
   colour. Click to toggle — the source `[ ]` ↔ `[x]` flip goes

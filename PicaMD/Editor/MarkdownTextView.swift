@@ -37,6 +37,10 @@ struct MarkdownTextView: NSViewRepresentable {
     /// `NSScrollView` so the caret line lands at the vertical centre
     /// of the viewport. Toggled via the Typewriter Mode menu / `⌃⌘Y`.
     var typewriterMode: Bool = false
+    /// Find/replace bar state for this window. Matching + highlight drawing
+    /// + navigation/replace are driven by the Coordinator; the bar UI and
+    /// the Find menu talk to the same `SearchModel`.
+    var search: SearchModel? = nil
 
     func makeNSView(context: Context) -> NSScrollView {
         let (scrollView, textView) = PicaMDTextView.makeScrollable()
@@ -59,19 +63,22 @@ struct MarkdownTextView: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: EditorLayout.textContainerInsetWidth,
                                              height: EditorLayout.textContainerInsetHeight)
         textView.isAutomaticDataDetectionEnabled = false
-        textView.isIncrementalSearchingEnabled = true
         textView.drawsBackground = true
         textView.backgroundColor = .textBackgroundColor
         textView.insertionPointColor = .textColor
-        // ⌘F shows a find-bar with built-in Regex toggle; ⌘E uses
-        // selection as the search pattern; ⌘G goes to the next match.
-        textView.usesFindBar = true
-        textView.usesFindPanel = false  // legacy panel is replaced by the bar
+        // PicaMD ships its own Markdown-aware find bar (see SearchModel /
+        // SearchBarView / FindCommands), so the stock NSTextView find bar
+        // is disabled: it can't see through the editor's marker
+        // concealment, and leaving it on would double-bind ⌘F.
+        textView.usesFindBar = false
+        textView.usesFindPanel = false
+        textView.isIncrementalSearchingEnabled = false
 
         textView.string = text
         context.coordinator.seedTextMirror(text)
         context.coordinator.textView = textView
         context.coordinator.scrollView = scrollView
+        context.coordinator.search = search
         context.coordinator.isDark = textView.effectiveAppearance.isDark
         context.coordinator.highlighter.theme = theme
         applyTheme(theme, to: scrollView, textView: textView)
@@ -183,6 +190,14 @@ struct MarkdownTextView: NSViewRepresentable {
                 self.jumpToken = nil
             }
         }
+
+        // Find/replace bar: react to query/option/open changes + one-shot
+        // commands (next / previous / replace / use-selection). Deferred to
+        // the next main-actor tick so reporting counts back to the model
+        // doesn't mutate observable state mid-SwiftUI-update.
+        let coordinator = context.coordinator
+        coordinator.search = search
+        Task { @MainActor in coordinator.syncSearch() }
     }
 
     func makeCoordinator() -> Coordinator {
@@ -253,6 +268,23 @@ struct MarkdownTextView: NSViewRepresentable {
         // with the right baseline; only headings/inline markup need
         // the highlighter's styling, and only the visible ones do.
         private var needsFullHighlight: Bool = false
+
+        // MARK: - Find-bar state
+        /// The active window's search model (same instance the bar + Find
+        /// menu use). Set on creation and on each `updateNSView`.
+        var search: SearchModel?
+        /// Last values seen from the model, to detect what changed between
+        /// SwiftUI re-renders.
+        private var lastSearchQuery: String = ""
+        private var lastSearchOptions = SearchOptions()
+        private var lastSearchOpen = false
+        private var lastConsumedActionToken: UUID?
+        /// Current match set, document order. Mirrored into the text view
+        /// for drawing.
+        private var searchMatches: [NSRange] = []
+        /// 1-based index of the current match; 0 = none.
+        private var currentMatchIndex = 0
+        private var searchRefreshTask: Task<Void, Never>?
 
         init(parent: MarkdownTextView) {
             self.parent = parent
@@ -475,6 +507,7 @@ struct MarkdownTextView: NSViewRepresentable {
             parent.text = str
             currentTextMirror.withLock { $0 = str }
             scheduleHighlight(delay: EditorTiming.highlightDebounceMs)
+            scheduleSearchRefresh()
         }
 
         /// Seed the lock-protected text mirror when the buffer is set
@@ -740,6 +773,212 @@ struct MarkdownTextView: NSViewRepresentable {
         /// large reload from disk).
         func invalidateFullHighlight() {
             needsFullHighlight = true
+        }
+
+        // MARK: - Find-bar logic
+
+        /// Called from `updateNSView`: reconcile the editor with the
+        /// model's current state. Handles open/close transitions,
+        /// query/option edits, and one-shot commands.
+        func syncSearch() {
+            guard let search = search else { return }
+
+            let openChanged = search.isOpen != lastSearchOpen
+            lastSearchOpen = search.isOpen
+
+            // Bar closed: clear highlights once, swallow any stray action.
+            guard search.isOpen else {
+                if openChanged { clearSearchHighlights() }
+                lastConsumedActionToken = search.actionToken
+                lastSearchQuery = search.query
+                lastSearchOptions = search.options
+                return
+            }
+
+            // One-shot command (next/prev/replace/use-selection) takes
+            // priority — it carries a fresh, not-yet-consumed token.
+            if search.actionToken != lastConsumedActionToken, let action = search.pendingAction {
+                lastConsumedActionToken = search.actionToken
+                lastSearchQuery = search.query
+                lastSearchOptions = search.options
+                performSearchAction(action)
+                return
+            }
+            lastConsumedActionToken = search.actionToken
+
+            let queryChanged = search.query != lastSearchQuery
+            let optionsChanged = search.options != lastSearchOptions
+            lastSearchQuery = search.query
+            lastSearchOptions = search.options
+
+            if openChanged || queryChanged || optionsChanged {
+                runSearch(resetToNearest: true, scroll: true)
+            }
+        }
+
+        private func performSearchAction(_ action: SearchModel.Action) {
+            switch action {
+            case .next: navigateSearch(by: 1)
+            case .previous: navigateSearch(by: -1)
+            case .replaceCurrent: replaceCurrentMatch()
+            case .replaceAll: replaceAllMatches()
+            case .useSelection:
+                if let tv = textView {
+                    let sel = tv.selectedRange()
+                    if sel.length > 0, NSMaxRange(sel) <= (tv.string as NSString).length {
+                        let s = (tv.string as NSString).substring(with: sel)
+                        search?.setQuery(s)
+                        lastSearchQuery = s
+                    }
+                }
+                runSearch(resetToNearest: true, scroll: true)
+            }
+        }
+
+        /// Light debounce so live edits with the bar open keep counts +
+        /// highlights current without scrolling the doc on every keystroke.
+        func scheduleSearchRefresh() {
+            guard search?.isOpen == true else { return }
+            searchRefreshTask?.cancel()
+            searchRefreshTask = Task { @MainActor [weak self] in
+                try? await Task.sleep(for: .milliseconds(80))
+                if Task.isCancelled { return }
+                self?.runSearch(resetToNearest: false, scroll: false)
+            }
+        }
+
+        /// Recompute matches over the live buffer, update highlights, the
+        /// current-match index, and report counts back to the model.
+        private func runSearch(resetToNearest: Bool, scroll: Bool) {
+            guard let search = search, let tv = textView else { return }
+            guard search.isOpen, !search.query.isEmpty else {
+                searchMatches = []
+                currentMatchIndex = 0
+                pushHighlights(current: nil)
+                search.report(count: 0, index: 0, invalidRegex: false)
+                return
+            }
+            let source = tv.string
+            let query = search.query
+            let options = search.options
+
+            guard DocumentSearch.isValid(query: query, options: options) else {
+                searchMatches = []
+                currentMatchIndex = 0
+                pushHighlights(current: nil)
+                search.report(count: 0, index: 0, invalidRegex: true)
+                return
+            }
+
+            let matches = DocumentSearch.matches(in: source, query: query, options: options)
+            searchMatches = matches
+
+            if matches.isEmpty {
+                currentMatchIndex = 0
+            } else if resetToNearest || currentMatchIndex == 0 {
+                currentMatchIndex = nearestMatchIndex(to: tv.selectedRange().location)
+            } else {
+                currentMatchIndex = min(currentMatchIndex, matches.count)
+            }
+
+            let current = currentMatchIndex > 0 ? matches[currentMatchIndex - 1] : nil
+            pushHighlights(current: current)
+            if scroll, let current = current { scrollToMatch(current) }
+            search.report(count: matches.count, index: currentMatchIndex, invalidRegex: false)
+        }
+
+        /// First match at/after `loc`, wrapping to the first match. 1-based.
+        private func nearestMatchIndex(to loc: Int) -> Int {
+            guard !searchMatches.isEmpty else { return 0 }
+            for (i, m) in searchMatches.enumerated() where m.location >= loc {
+                return i + 1
+            }
+            return 1
+        }
+
+        private func navigateSearch(by delta: Int) {
+            // Matches may be stale if the doc changed since the last pass;
+            // recompute counts silently first (no scroll) then move.
+            if searchMatches.isEmpty {
+                runSearch(resetToNearest: true, scroll: false)
+            }
+            guard !searchMatches.isEmpty else { return }
+            let count = searchMatches.count
+            let base = currentMatchIndex == 0 ? 1 : currentMatchIndex
+            var idx = (base - 1) + delta
+            idx = ((idx % count) + count) % count
+            currentMatchIndex = idx + 1
+            let current = searchMatches[idx]
+            pushHighlights(current: current)
+            scrollToMatch(current)
+            search?.report(count: count, index: currentMatchIndex, invalidRegex: false)
+        }
+
+        private func replaceCurrentMatch() {
+            guard let search = search, !search.options.ignoreFormatting,
+                  let tv = textView, let storage = tv.textStorage else { return }
+            guard currentMatchIndex > 0, currentMatchIndex <= searchMatches.count else { return }
+            let match = searchMatches[currentMatchIndex - 1]
+            guard NSMaxRange(match) <= storage.length else { return }
+            let replacement = DocumentSearch.replacementText(
+                forMatch: match, in: tv.string, query: search.query,
+                template: search.replaceText, options: search.options)
+            if tv.shouldChangeText(in: match, replacementString: replacement) {
+                storage.replaceCharacters(in: match, with: replacement)
+                tv.didChangeText()
+            }
+            let newLoc = match.location + (replacement as NSString).length
+            let total = (tv.string as NSString).length
+            tv.setSelectedRange(NSRange(location: min(newLoc, total), length: 0))
+            // Re-search from the new caret so we land on the next occurrence.
+            runSearch(resetToNearest: true, scroll: true)
+        }
+
+        private func replaceAllMatches() {
+            guard let search = search, !search.options.ignoreFormatting,
+                  let tv = textView, let storage = tv.textStorage else { return }
+            let source = tv.string
+            let matches = DocumentSearch.matches(in: source, query: search.query, options: search.options)
+            guard !matches.isEmpty else { return }
+            let fullRange = NSRange(location: 0, length: (source as NSString).length)
+            // Bracket the whole multi-range edit as a single undo step.
+            guard tv.shouldChangeText(in: fullRange, replacementString: nil) else { return }
+            storage.beginEditing()
+            for match in matches.reversed() {
+                guard NSMaxRange(match) <= storage.length else { continue }
+                let replacement = DocumentSearch.replacementText(
+                    forMatch: match, in: source, query: search.query,
+                    template: search.replaceText, options: search.options)
+                storage.replaceCharacters(in: match, with: replacement)
+            }
+            storage.endEditing()
+            tv.didChangeText()
+            runSearch(resetToNearest: true, scroll: true)
+        }
+
+        private func clearSearchHighlights() {
+            searchMatches = []
+            currentMatchIndex = 0
+            pushHighlights(current: nil)
+            // Return focus to the editor so typing resumes immediately.
+            if let tv = textView { tv.window?.makeFirstResponder(tv) }
+        }
+
+        private func pushHighlights(current: NSRange?) {
+            guard let qmd = textView as? PicaMDTextView else { return }
+            let accent = ThemeStore.currentAccent
+            qmd.searchHighlightColor = accent.withAlphaComponent(0.28)
+            qmd.currentSearchHighlightColor = accent.withAlphaComponent(0.5)
+            qmd.currentSearchBorderColor = accent
+            qmd.setSearchMatches(searchMatches, current: current)
+        }
+
+        private func scrollToMatch(_ range: NSRange) {
+            guard let tv = textView else { return }
+            let total = (tv.string as NSString).length
+            let loc = min(range.location, total)
+            let len = min(range.length, max(0, total - loc))
+            tv.scrollRangeToVisible(NSRange(location: loc, length: len))
         }
 
         private func computeViewportCharRange() -> NSRange? {

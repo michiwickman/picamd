@@ -22,6 +22,9 @@ private struct CommandPaletteKey: FocusedValueKey {
 private struct ActiveDocumentContextKey: FocusedValueKey {
     typealias Value = ActiveDocumentContext
 }
+private struct SearchModelKey: FocusedValueKey {
+    typealias Value = SearchModel
+}
 
 /// Read-only snapshot of what the active window's editor is currently
 /// holding, surfaced to the App's `Commands` block via `@FocusedValue`
@@ -49,6 +52,12 @@ extension FocusedValues {
     var activeDocumentContext: ActiveDocumentContext? {
         get { self[ActiveDocumentContextKey.self] }
         set { self[ActiveDocumentContextKey.self] = newValue }
+    }
+    /// The active editor window's find/replace model, so the Find menu
+    /// can drive ⌘F / ⌘G / Replace on whichever window is frontmost.
+    var searchModel: SearchModel? {
+        get { self[SearchModelKey.self] }
+        set { self[SearchModelKey.self] = newValue }
     }
 }
 

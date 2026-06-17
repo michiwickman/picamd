@@ -73,6 +73,7 @@ struct PicaMDApp: App {
                 }
                 .keyboardShortcut("t", modifiers: .command)
             }
+            FindCommands()
             EditorModeCommands()
             ExportCommands()
             UpdaterCommands(controller: updater)
