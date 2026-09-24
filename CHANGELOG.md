@@ -6,6 +6,43 @@ is [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed (review, September 2026)
+
+- **Find & Replace works reliably.** Query, option and ⌘G changes often
+  never reached the editor; they now drive it directly. Navigating
+  selects the match, ⌘F re-focuses an open bar, the query field gets
+  focus on open, Replace All is one real undo step, regex `^`/`$` work
+  per line, whole-word handles `#tag`/`C++`/umlauts, and
+  ignore-formatting search follows what the editor actually hides
+  (`snake_case` is findable again). Edit ▸ Find submenu with the
+  standard items plus Jump to Selection (⌘J); bar text in English.
+- **Typing:** `don't` no longer becomes `don't'`, a ``` fence is three
+  backticks, `---` / `|---|` are no longer turned into dashes. Smart
+  punctuation is off by default; both it and auto-pairing are toggles
+  in Settings ▸ Blocks ▸ Editing.
+- ⌘⌥↑/↓ (move line) works, and no shortcut breaks under Caps Lock.
+  Show/Hide Outline moved to ⌃⌘S (⌃⌘1 swallowed AI preset 1).
+- File ▸ Open… (⌘O) and Open Recent are back.
+- Relative images show on open; paths with spaces, titles, `%20`, `~`
+  and absolute paths resolve. Dropped/pasted images get link-safe names.
+- Long documents: text scrolled into view is restyled (it could stay
+  raw Markdown after a theme change or typing a bracket near the top),
+  a one-line `$$x$$` no longer swallows the rest of the document, math
+  blocks outside the viewport stay rendered, CRLF tables render.
+- External changes are detected after the first save, and atomic saves
+  by other apps (git, other editors, the MCP sidecar) offer a reload.
+- AI: responses land on the text they were made from even if you kept
+  typing, one request at a time (Esc cancels), cut-off or refused
+  answers never replace text, "Custom prompt" asks what to do, the
+  popover mode shows its text, OpenAI reasoning models work.
+- Export: PDF/DOCX/EPUB include relative images and find MacTeX when
+  launched from Finder; HTML export keeps math intact and can't be
+  used to inject scripts through code-fence languages or links.
+- "Open Settings" buttons work on macOS 14+, Reset to Default updates
+  everything, switching to/from the Tahoe preset keeps caret and undo.
+- Auto-update: builds carry a real build number (Sparkle never saw a
+  newer version before).
+
 ### Changed
 
 - **Table cells wrap by default.** Rendered Markdown tables now word-wrap
@@ -30,7 +67,7 @@ is [SemVer](https://semver.org/).
   accent-tinted highlights painted on top of the glyphs, so they stay
   visible even where they cross concealed `**`/`_`/`` ` `` markup; the
   current match gets a bordered highlight and is scrolled into view.
-  - Live "n von m" counter, `⌘G` / `⇧⌘G` to cycle matches, `⌘E` to search
+  - Live "n of m" counter, `⌘G` / `⇧⌘G` to cycle matches, `⌘E` to search
     the selection, Esc to close.
   - Toggles for **case-sensitive**, **whole-word**, and **regex** (with an
     invalid-pattern indicator).
