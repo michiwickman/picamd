@@ -29,6 +29,12 @@ enum EditorTiming {
     /// pop in before the user notices the placeholder. 150 ms feels
     /// right in testing.
     static let lazyLiveSetDebounceMs: Int = 150
+    /// Find bar: re-match after the query or options change. Short enough
+    /// to feel live, long enough to skip intermediate keystrokes on big docs.
+    static let searchQueryDebounceMs: Int = 30
+    /// Find bar: refresh counts/highlights after the document is edited
+    /// while the bar is open.
+    static let searchRefreshDebounceMs: Int = 80
 }
 
 enum EditorLayout {

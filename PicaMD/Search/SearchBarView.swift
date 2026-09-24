@@ -30,10 +30,8 @@ struct SearchBarView: View {
         .padding(.top, 8)
         .padding(.trailing, 14)
         .tint(accent)
-        .onAppear { queryFocused = true }
-        .onChange(of: model.focusToken) { _, _ in
-            queryFocused = true
-        }
+        .onAppear { focusQueryField() }
+        .onChange(of: model.focusToken) { _, _ in focusQueryField() }
         // ESC anywhere in the bar closes it.
         .onExitCommand { model.close() }
     }
@@ -66,12 +64,12 @@ struct SearchBarView: View {
                     .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.borderless)
-            .help("Schließen (Esc)")
+            .help("Close (Esc)")
         }
     }
 
     private var queryField: some View {
-        TextField("Suchen", text: $model.query)
+        TextField("Find", text: $model.query)
             .textFieldStyle(.roundedBorder)
             .focused($queryFocused)
             .onSubmit { model.next() }
@@ -82,7 +80,7 @@ struct SearchBarView: View {
                         .foregroundStyle(.orange)
                         .font(.system(size: 11))
                         .padding(.trailing, 6)
-                        .help("Ungültiges reguläres Ausdrucksmuster")
+                        .help("Invalid regular expression")
                 }
             }
     }
@@ -92,11 +90,15 @@ struct SearchBarView: View {
             if model.query.isEmpty {
                 Text("")
             } else if model.invalidRegex {
-                Text("Ungültig").foregroundStyle(.orange)
+                Text("Invalid").foregroundStyle(.orange)
             } else if model.resultCount == 0 {
-                Text("Kein Treffer").foregroundStyle(.secondary)
+                Text("No matches").foregroundStyle(.secondary)
+            } else if model.currentIndex == 0 {
+                Text(verbatim: model.resultCount == 1 ? "1 match" : "\(model.resultCount) matches")
+                    .foregroundStyle(.secondary)
+                    .monospacedDigit()
             } else {
-                Text("\(model.currentIndex) von \(model.resultCount)")
+                Text("\(model.currentIndex) of \(model.resultCount)")
                     .foregroundStyle(.secondary)
                     .monospacedDigit()
             }
@@ -110,11 +112,11 @@ struct SearchBarView: View {
             Button { model.previous() } label: {
                 Image(systemName: "chevron.up")
             }
-            .help("Vorheriger Treffer (⇧⌘G)")
+            .help("Previous match (⇧⌘G)")
             Button { model.next() } label: {
                 Image(systemName: "chevron.down")
             }
-            .help("Nächster Treffer (⌘G)")
+            .help("Next match (⌘G)")
         }
         .buttonStyle(.borderless)
         .font(.system(size: 11, weight: .semibold))
@@ -124,13 +126,13 @@ struct SearchBarView: View {
     private var optionToggles: some View {
         HStack(spacing: 3) {
             toggle("Aa", isOn: $model.options.caseSensitive,
-                   help: "Groß-/Kleinschreibung beachten")
+                   help: "Match case")
             toggle(image: "textformat.abc.dottedunderline", isOn: $model.options.wholeWord,
-                   help: "Nur ganze Wörter")
+                   help: "Whole words only")
             toggle(".*", isOn: $model.options.regex,
-                   help: "Regulärer Ausdruck", mono: true)
+                   help: "Regular expression", mono: true)
             toggle(image: "asterisk", isOn: $model.options.ignoreFormatting,
-                   help: "Markdown-Formatierung ignorieren (findet **fett** über „fett“)")
+                   help: "Ignore Markdown formatting (\"bold word\" finds **bold** word)")
         }
     }
 
@@ -142,25 +144,37 @@ struct SearchBarView: View {
                 .foregroundStyle(.secondary)
                 .font(.system(size: 11))
 
-            TextField("Ersetzen", text: $model.replaceText)
+            TextField("Replace", text: $model.replaceText)
                 .textFieldStyle(.roundedBorder)
                 .focused($replaceFocused)
                 .frame(minWidth: 120)
+                .onSubmit { model.replaceCurrent() }
 
             Spacer(minLength: 4)
 
-            Button("Ersetzen") { model.replaceCurrent() }
+            Button("Replace") { model.replaceCurrent() }
                 .disabled(replaceDisabled || model.resultCount == 0)
-            Button("Alle") { model.replaceAll() }
+            Button("All") { model.replaceAll() }
                 .disabled(replaceDisabled || model.resultCount == 0)
         }
         .font(.system(size: 11))
         .help(model.options.ignoreFormatting
-              ? "Ersetzen ist deaktiviert, solange „Formatierung ignorieren“ aktiv ist"
+              ? "Replace is unavailable while Ignore Formatting is on"
               : "")
     }
 
     private var replaceDisabled: Bool { model.options.ignoreFormatting }
+
+    /// Focus + select-all the query field. Deferred a runloop tick: a
+    /// TextField that was just inserted into the overlay isn't in the
+    /// window's responder chain yet, so a synchronous focus request from
+    /// `onAppear` is dropped and keystrokes keep going to the document.
+    /// Resetting to `false` first makes ⌘F re-focus the field even when
+    /// SwiftUI still believes it's focused after the editor took over.
+    private func focusQueryField() {
+        queryFocused = false
+        DispatchQueue.main.async { queryFocused = true }
+    }
 
     // MARK: - Toggle helpers
 

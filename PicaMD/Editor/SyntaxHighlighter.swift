@@ -48,14 +48,8 @@ final class SyntaxHighlighter {
 
     // Patterns shared with BlockExtractor live in MarkdownRegexes.
     private static var fencedCodeRegex: NSRegularExpression { MarkdownRegexes.fencedCode }
-    private static let headingRegex = try! NSRegularExpression(
-        pattern: #"^(#{1,6})([ \t]+)(.+?)[ \t]*#*$"#,
-        options: [.anchorsMatchLines]
-    )
-    private static let blockquoteRegex = try! NSRegularExpression(
-        pattern: #"^(>[ \t]?)(.*)$"#,
-        options: [.anchorsMatchLines]
-    )
+    private static var headingRegex: NSRegularExpression { MarkdownRegexes.heading }
+    private static var blockquoteRegex: NSRegularExpression { MarkdownRegexes.blockquote }
     private static let listRegex = try! NSRegularExpression(
         pattern: #"^([ \t]*)([-*+]|\d+\.)([ \t]+)"#,
         options: [.anchorsMatchLines]
@@ -64,43 +58,19 @@ final class SyntaxHighlighter {
     // — used by both this highlighter (for concealment + strike-through)
     // and the overlay manager (for view placement) so they can never
     // disagree on which lines have checkboxes.
-    private static let boldRegex = try! NSRegularExpression(
-        pattern: #"(?<![*_\w])(\*\*|__)(?=\S)([\s\S]+?)(?<=\S)\1(?![*_\w])"#,
-        options: []
-    )
-    private static let italicRegex = try! NSRegularExpression(
-        pattern: #"(?<![*_\w])(\*|_)(?=\S)([^*_\n]+?)(?<=\S)\1(?![*_\w])"#,
-        options: []
-    )
-    private static let inlineCodeRegex = try! NSRegularExpression(
-        pattern: #"(`+)([^`\n]+?)\1"#,
-        options: []
-    )
-    private static let linkRegex = try! NSRegularExpression(
-        pattern: #"(!?)\[([^\]]*)\]\(([^)]+)\)"#,
-        options: []
-    )
-    private static let strikethroughRegex = try! NSRegularExpression(
-        pattern: #"(~~)(?=\S)([\s\S]+?)(?<=\S)\1"#,
-        options: []
-    )
-    private static let highlightRegex = try! NSRegularExpression(
-        pattern: #"(==)(?=\S)([\s\S]+?)(?<=\S)\1"#,
-        options: []
-    )
+    private static var boldRegex: NSRegularExpression { MarkdownRegexes.bold }
+    private static var italicRegex: NSRegularExpression { MarkdownRegexes.italic }
+    private static var inlineCodeRegex: NSRegularExpression { MarkdownRegexes.inlineCode }
+    private static var linkRegex: NSRegularExpression { MarkdownRegexes.link }
+    private static var strikethroughRegex: NSRegularExpression { MarkdownRegexes.strikethrough }
+    private static var highlightRegex: NSRegularExpression { MarkdownRegexes.highlight }
     private static let hrRegex = try! NSRegularExpression(
         pattern: #"^[ \t]*(\*[ \t]*\*[ \t]*\*[\* \t]*|-[ \t]*-[ \t]*-[\- \t]*|_[ \t]*_[ \t]*_[_ \t]*)$"#,
         options: [.anchorsMatchLines]
     )
-    private static let mathInlineRegex = try! NSRegularExpression(
-        pattern: #"(?<!\$)(\$)(?!\s)([^\$\n]+?)(?<!\s)\1(?!\$)"#,
-        options: []
-    )
+    private static var mathInlineRegex: NSRegularExpression { MarkdownRegexes.mathInline }
     private static var mathBlockRegex: NSRegularExpression { MarkdownRegexes.mathBlock }
-    private static let frontmatterRegex = try! NSRegularExpression(
-        pattern: #"\A---\n[\s\S]*?\n---\n"#,
-        options: []
-    )
+    private static var frontmatterRegex: NSRegularExpression { MarkdownRegexes.frontmatter }
     private static let footnoteRefRegex = try! NSRegularExpression(
         pattern: #"\[\^([^\]]+)\]"#,
         options: []

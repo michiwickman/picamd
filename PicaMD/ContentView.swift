@@ -85,8 +85,11 @@ struct ContentView: View {
                 } label: {
                     Image(systemName: showOutline ? "sidebar.left" : "sidebar.leading")
                 }
-                .help("Toggle Outline (⌃⌘1)")
-                .keyboardShortcut("1", modifiers: [.control, .command])
+                // ⌃⌘S is the standard Mac "Show/Hide Sidebar" shortcut.
+                // (It used to be ⌃⌘1, which silently swallowed the first
+                // AI-preset hotkey — ⌃⌘1…⌃⌘9 are reserved for those.)
+                .help("Show/Hide Outline (⌃⌘S)")
+                .keyboardShortcut("s", modifiers: [.control, .command])
             }
         }
     }
@@ -146,6 +149,7 @@ struct ContentView: View {
                     .transition(.move(edge: .top).combined(with: .opacity))
             }
         }
+        .animation(.easeOut(duration: 0.15), value: search.isOpen)
     }
 
     private func recomputeHeadings(_ text: String) {
@@ -188,7 +192,7 @@ struct ContentView: View {
         // View toggles
         actions.append(contentsOf: [
             .init(title: "Toggle Outline Sidebar",
-                   subtitle: showOutline ? "Currently shown · ⌃⌘1" : "Currently hidden · ⌃⌘1",
+                   subtitle: showOutline ? "Currently shown · ⌃⌘S" : "Currently hidden · ⌃⌘S",
                    icon: "sidebar.left",
                    perform: { withAnimation(.easeInOut(duration: 0.18)) { showOutline.toggle() } }),
             .init(title: "Toggle Focus Mode",

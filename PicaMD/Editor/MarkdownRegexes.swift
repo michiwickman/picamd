@@ -28,6 +28,21 @@ enum MarkdownRegexes {
         options: [.caseInsensitive]
     )
 
+    // Inline / line-level markup whose markers the editor conceals. Shared
+    // by `SyntaxHighlighter` (which hides the markers) and `DocumentSearch`
+    // (whose ignore-formatting mode searches the text left visible), so
+    // the two can't drift apart on what counts as markup.
+    static let heading = compile(#"^(#{1,6})([ \t]+)(.+?)[ \t]*#*$"#, options: [.anchorsMatchLines])
+    static let blockquote = compile(#"^(>[ \t]?)(.*)$"#, options: [.anchorsMatchLines])
+    static let bold = compile(#"(?<![*_\w])(\*\*|__)(?=\S)([\s\S]+?)(?<=\S)\1(?![*_\w])"#)
+    static let italic = compile(#"(?<![*_\w])(\*|_)(?=\S)([^*_\n]+?)(?<=\S)\1(?![*_\w])"#)
+    static let inlineCode = compile(#"(`+)([^`\n]+?)\1"#)
+    static let link = compile(#"(!?)\[([^\]]*)\]\(([^)]+)\)"#)
+    static let strikethrough = compile(#"(~~)(?=\S)([\s\S]+?)(?<=\S)\1"#)
+    static let highlight = compile(#"(==)(?=\S)([\s\S]+?)(?<=\S)\1"#)
+    static let mathInline = compile(#"(?<!\$)(\$)(?!\s)([^\$\n]+?)(?<!\s)\1(?!\$)"#)
+    static let frontmatter = compile(#"\A---\n[\s\S]*?\n---\n"#)
+
     private static func compile(_ pattern: String,
                                  options: NSRegularExpression.Options = []) -> NSRegularExpression {
         try! NSRegularExpression(pattern: pattern, options: options)

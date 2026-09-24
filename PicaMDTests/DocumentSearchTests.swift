@@ -67,6 +67,26 @@ final class DocumentSearchTests: XCTestCase {
         XCTAssertTrue(DocumentSearch.isValid(query: "(a)", options: opts))
     }
 
+    func testWholeWordWithPunctuationAtTheEdges() {
+        // `\b` can't sit next to `#` or `+`; whole-word must still work.
+        var opts = SearchOptions(); opts.wholeWord = true
+        XCTAssertEqual(DocumentSearch.matches(in: "#tag and x#tag", query: "#tag", options: opts).map(\.location), [0])
+        XCTAssertEqual(DocumentSearch.matches(in: "C++ and C++x", query: "C++", options: opts).map(\.location), [0])
+    }
+
+    func testWholeWordHandlesNonASCIILetters() {
+        var opts = SearchOptions(); opts.wholeWord = true
+        let src = "Maß Maßband Maß"
+        XCTAssertEqual(DocumentSearch.matches(in: src, query: "Maß", options: opts).count, 2)
+    }
+
+    func testRegexAnchorsMatchEachLine() {
+        var opts = SearchOptions(); opts.regex = true
+        let src = "# One\ntext\n# Two"
+        XCTAssertEqual(substrings(src, DocumentSearch.matches(in: src, query: "^# \\w+", options: opts)),
+                       ["# One", "# Two"])
+    }
+
     func testRegexWholeWordCombined() {
         let src = "id7 id77 zid7"
         var opts = SearchOptions(); opts.regex = true; opts.wholeWord = true
@@ -85,13 +105,50 @@ final class DocumentSearchTests: XCTestCase {
     }
 
     func testIgnoreFormattingSpansConcealedMarkers() {
-        // "abc" rendered from "a**b**c" — the source range must cover the
-        // whole visible run including the concealed markers.
-        let src = "a**b**c"
+        // "a b c" rendered from "a **b** c" — the source range must cover
+        // the whole visible run including the concealed markers.
+        let src = "a **b** c"
         var opts = SearchOptions(); opts.ignoreFormatting = true
-        let m = DocumentSearch.matches(in: src, query: "abc", options: opts)
+        let m = DocumentSearch.matches(in: src, query: "a b c", options: opts)
         XCTAssertEqual(m.count, 1)
-        XCTAssertEqual(substrings(src, m), ["a**b**c"])
+        XCTAssertEqual(substrings(src, m), ["a **b** c"])
+    }
+
+    func testIgnoreFormattingKeepsIntrawordMarkerCharacters() {
+        // The editor doesn't conceal `_` in snake_case, a lone `=`, or
+        // `**` that isn't emphasis, so ignore-formatting must still find
+        // them as typed (the old reducer dropped every `_ * = ~` char).
+        var opts = SearchOptions(); opts.ignoreFormatting = true
+        XCTAssertEqual(DocumentSearch.matches(in: "call snake_case now", query: "snake_case", options: opts).count, 1)
+        XCTAssertEqual(DocumentSearch.matches(in: "let a = b", query: "a = b", options: opts).count, 1)
+        XCTAssertEqual(DocumentSearch.matches(in: "2 * 3 * 4", query: "2 * 3", options: opts).count, 1)
+        XCTAssertEqual(DocumentSearch.matches(in: "a**b**c", query: "a**b**c", options: opts).count, 1)
+    }
+
+    func testIgnoreFormattingHidesBoldItalicInnerMarkers() {
+        let (plain, _) = DocumentSearch.plainText(from: "x ***both*** y")
+        XCTAssertEqual(plain, "x both y")
+    }
+
+    func testIgnoreFormattingLeavesMathBlocksAndFrontmatterVerbatim() {
+        let src = "---\ntitle: **t**\n---\n$$\na*b*c\n$$\n"
+        let (plain, _) = DocumentSearch.plainText(from: src)
+        XCTAssertTrue(plain.contains("title: **t**"), plain)
+        XCTAssertTrue(plain.contains("a*b*c"), plain)
+    }
+
+    func testIgnoreFormattingFindsImageAltText() {
+        let src = "before ![a diagram](img.png) after"
+        var opts = SearchOptions(); opts.ignoreFormatting = true
+        XCTAssertEqual(substrings(src, DocumentSearch.matches(in: src, query: "a diagram", options: opts)),
+                       ["a diagram"])
+        XCTAssertTrue(DocumentSearch.matches(in: src, query: "img.png", options: opts).isEmpty,
+                      "the concealed URL isn't visible text")
+    }
+
+    func testIgnoreFormattingReportsInvalidRegex() {
+        var opts = SearchOptions(); opts.ignoreFormatting = true; opts.regex = true
+        XCTAssertFalse(DocumentSearch.isValid(query: "(", options: opts))
     }
 
     func testIgnoreFormattingMatchesPhraseSpanningMarkers() {
@@ -158,6 +215,35 @@ final class DocumentSearchTests: XCTestCase {
                                                  query: "world", template: "there",
                                                  options: SearchOptions())
         XCTAssertEqual(out, "there")
+    }
+
+    func testReplacementsPairEveryMatchWithItsExpansion() {
+        var opts = SearchOptions(); opts.regex = true
+        let src = "a1 b2 c3"
+        let reps = DocumentSearch.replacements(in: src, query: #"([a-z])(\d)"#, template: "$2$1", options: opts)
+        XCTAssertEqual(reps.map(\.text), ["1a", "2b", "3c"])
+        XCTAssertEqual(substrings(src, reps.map(\.range)), ["a1", "b2", "c3"])
+    }
+
+    func testLiteralReplacementsKeepDollarSignsVerbatim() {
+        let reps = DocumentSearch.replacements(in: "cost cost", query: "cost", template: "$1", options: SearchOptions())
+        XCTAssertEqual(reps.map(\.text), ["$1", "$1"])
+    }
+
+    func testRegexReplacementSeesLookbehindContext() {
+        // Re-matching only inside the match range used to hide the text a
+        // lookbehind needs, so `$0` came back unexpanded.
+        var opts = SearchOptions(); opts.regex = true
+        let src = "x=1 y=2"
+        let match = (src as NSString).range(of: "2")
+        let out = DocumentSearch.replacementText(forMatch: match, in: src, query: #"(?<=y=)\d"#,
+                                                 template: "[$0]", options: opts)
+        XCTAssertEqual(out, "[2]")
+    }
+
+    func testNoReplacementsInIgnoreFormattingMode() {
+        var opts = SearchOptions(); opts.ignoreFormatting = true
+        XCTAssertTrue(DocumentSearch.replacements(in: "a **b**", query: "b", template: "c", options: opts).isEmpty)
     }
 
     func testRegexReplacementExpandsCaptures() {
