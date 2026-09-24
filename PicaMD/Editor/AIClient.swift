@@ -96,6 +96,14 @@ struct AIClient {
               let first = choices.first else {
             throw AIError.invalidResponse("no choices in response")
         }
+        switch first["finish_reason"] as? String {
+        case "length":
+            throw AIError.truncated
+        case "content_filter":
+            throw AIError.refused
+        default:
+            break
+        }
         if let message = first["message"] as? [String: Any],
            let content = message["content"] as? String {
             return content
@@ -111,9 +119,17 @@ struct AIClient {
 enum AIError: LocalizedError {
     case invalidResponse(String)
     case serverError(status: Int, body: String)
+    /// The model hit its output limit mid-answer.
+    case truncated
+    /// The provider declined to answer.
+    case refused
 
     var errorDescription: String? {
         switch self {
+        case .truncated:
+            return "The AI's answer was cut off at the output limit, so nothing was changed. Try a shorter selection."
+        case .refused:
+            return "The AI declined to answer this request, so nothing was changed."
         case .invalidResponse(let why):
             return "Unexpected response from AI server: \(why)"
         case .serverError(let status, let body):

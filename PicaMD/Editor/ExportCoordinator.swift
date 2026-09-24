@@ -4,21 +4,21 @@ import UniformTypeIdentifiers
 /// Drives the "Export As…" actions from the File menu. Each format
 /// gets its own menu item so the user picks the format from the menu
 /// itself — no extra "pick format" sheet, no extra clicks. Pandoc
-/// formats grey themselves out automatically when pandoc isn't on
-/// the system.
+/// formats explain how to install pandoc when it's missing.
 @MainActor
 enum ExportCoordinator {
 
     /// Exports the active document's source string to HTML using the
     /// in-process renderer. Always available (no external dep).
     static func exportHTML(source: String,
-                            documentName: String?,
+                            documentURL: URL?,
                             paletteForStyling: Palette? = nil) {
-        let suggested = (documentName ?? "Untitled").replacingOccurrences(of: ".md", with: "") + ".html"
+        let suggested = baseName(for: documentURL) + ".html"
         runSavePanel(
             suggestedFilename: suggested,
             allowedTypes: [.html],
-            tag: "HTML"
+            tag: "HTML",
+            directory: documentURL?.deletingLastPathComponent()
         ) { url in
             let html = MarkdownToHTML.render(source, palette: paletteForStyling)
             do {
@@ -33,14 +33,33 @@ enum ExportCoordinator {
     /// Pandoc-driven PDF export. Surfaces a "pandoc not installed"
     /// alert with a Homebrew hint instead of failing silently.
     static func exportViaPandoc(source: String,
-                                 documentName: String?,
+                                 documentURL: URL?,
                                  format: PandocBridge.Format) {
-        guard PandocBridge.locate() != nil else {
-            presentPandocMissingAlert(format: format)
-            return
+        // Locating pandoc spawns `which`; keep that off the main thread.
+        Task.detached(priority: .userInitiated) {
+            let found = PandocBridge.locate() != nil
+            await MainActor.run {
+                if found {
+                    runPandocSavePanel(source: source, documentURL: documentURL, format: format)
+                } else {
+                    presentPandocMissingAlert(format: format)
+                }
+            }
         }
-        let base = (documentName ?? "Untitled").replacingOccurrences(of: ".md", with: "")
-        let suggested = "\(base).\(format.fileExtension)"
+    }
+
+    /// `notes.md` → `notes`, `README.markdown` → `README`. (Replacing
+    /// ".md" anywhere in the name turned `a.md.notes.md` into `anotes`.)
+    static func baseName(for documentURL: URL?) -> String {
+        guard let url = documentURL else { return "Untitled" }
+        return url.deletingPathExtension().lastPathComponent
+    }
+
+    private static func runPandocSavePanel(source: String,
+                                           documentURL: URL?,
+                                           format: PandocBridge.Format) {
+        let suggested = "\(baseName(for: documentURL)).\(format.fileExtension)"
+        let resourceDirectory = documentURL?.deletingLastPathComponent()
         let allowedTypes: [UTType] = {
             switch format {
             case .pdf:  return [.pdf]
@@ -51,14 +70,16 @@ enum ExportCoordinator {
         runSavePanel(
             suggestedFilename: suggested,
             allowedTypes: allowedTypes,
-            tag: format.displayName
+            tag: format.displayName,
+            directory: resourceDirectory
         ) { url in
             // pandoc runs synchronously and can take a few seconds for
             // large docs / PDF — hop off main so the UI stays responsive,
             // then come back to surface success/errors.
             Task.detached(priority: .userInitiated) {
                 do {
-                    try PandocBridge.export(markdown: source, to: url, format: format)
+                    try PandocBridge.export(markdown: source, to: url, format: format,
+                                            resourceDirectory: resourceDirectory)
                     await MainActor.run {
                         // Reveal in Finder so the user can verify the export.
                         NSWorkspace.shared.activateFileViewerSelecting([url])
@@ -78,8 +99,12 @@ enum ExportCoordinator {
     private static func runSavePanel(suggestedFilename: String,
                                       allowedTypes: [UTType],
                                       tag: String,
+                                      directory: URL? = nil,
                                       completion: @escaping (URL) -> Void) {
         let panel = NSSavePanel()
+        // Next to the document by default, so relative image paths in an
+        // exported HTML file still point at the document's assets.
+        if let directory { panel.directoryURL = directory }
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = suggestedFilename
         panel.allowedContentTypes = allowedTypes

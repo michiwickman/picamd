@@ -38,7 +38,14 @@ fi
 
 VERSION="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)"
 [ -n "$VERSION" ] || { echo "Could not read MARKETING_VERSION from project.yml"; exit 1; }
-echo "==> Building PicaMD $VERSION"
+
+# Sparkle compares the appcast's <sparkle:version> with CFBundleVersion,
+# which used to stay "1" forever — so an update was never "newer". Use
+# a monotonic build number (commit count) and put the SAME number into
+# <sparkle:version> for this release.
+BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+/usr/bin/sed -i '' "s/CURRENT_PROJECT_VERSION: \".*\"/CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"/" project.yml
+echo "==> Building PicaMD $VERSION (build $BUILD_NUMBER)"
 
 mkdir -p dist
 rm -rf dist/PicaMD-*
@@ -117,6 +124,7 @@ SHA=$(/usr/bin/shasum -a 256 "$DEST" | awk '{print $1}')
 echo
 echo "============================================================"
 echo "PicaMD $VERSION packaged"
+echo "  Build:   $BUILD_NUMBER  (use as <sparkle:version> in appcast.xml)"
 echo "  File:    $DEST"
 echo "  Size:    $SIZE_MB"
 echo "  SHA-256: $SHA"

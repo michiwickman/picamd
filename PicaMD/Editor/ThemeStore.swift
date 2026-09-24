@@ -71,8 +71,9 @@ final class ThemeStore: ObservableObject {
 
     /// Reset everything back to the canonical default theme.
     func resetToDefault() {
-        theme = .default
-        save()
+        // Through `update` so the palette/accent mirrors and block
+        // overlays follow too (they kept the old palette before).
+        update { $0 = .default }
     }
 
     // MARK: - Persistence

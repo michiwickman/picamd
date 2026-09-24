@@ -166,8 +166,10 @@ extension ExtractedBlock {
     /// Parse a table block into rows of cells with optional column alignments.
     func parseTable() -> (alignments: [TableAlignment?], headers: [String], rows: [[String]])? {
         guard kind == .table else { return nil }
+        // `.newlines`, not "\n": in Swift "\r\n" is ONE Character, so a
+        // "\n" split left CRLF tables as a single line (rendered empty).
         let lines = payload
-            .split(separator: "\n", omittingEmptySubsequences: false)
+            .components(separatedBy: .newlines)
             .map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }
         guard lines.count >= 2 else { return nil }

@@ -65,17 +65,10 @@ final class ImageBlockView: BlockAttachmentView {
         let src = sourceURL
         guard !src.isEmpty else { return }
 
-        let url: URL?
-        if src.hasPrefix("http://") || src.hasPrefix("https://") {
-            url = URL(string: src)
-        } else if let docDir = documentURL?.deletingLastPathComponent() {
-            url = docDir.appendingPathComponent(src)
-        } else {
-            url = URL(fileURLWithPath: src)
-        }
-
-        guard let url = url else {
-            captionLabel.stringValue = "🖼  \(altText)  (could not resolve URL)"
+        guard let url = Self.resolve(src, relativeTo: documentURL) else {
+            captionLabel.stringValue = documentURL == nil && !src.contains("://")
+                ? "🖼  \(altText)  (save the document to show relative images)"
+                : "🖼  \(altText)  (could not resolve URL)"
             return
         }
         if url.isFileURL {
@@ -97,6 +90,31 @@ final class ImageBlockView: BlockAttachmentView {
                 }
             }.resume()
         }
+    }
+
+    /// Resolve an image destination the way Markdown renderers do:
+    /// `<path with spaces>`, an optional `"title"` after the path,
+    /// percent-encoding, `~`, absolute paths and `file://` URLs, and
+    /// paths relative to the document's folder.
+    static func resolve(_ raw: String, relativeTo documentURL: URL?) -> URL? {
+        var src = raw.trimmingCharacters(in: .whitespaces)
+        if src.hasPrefix("<"), let close = src.firstIndex(of: ">") {
+            src = String(src[src.index(after: src.startIndex)..<close])
+        } else if let title = src.range(of: #"\s+["'(]"#, options: .regularExpression) {
+            src = String(src[..<title.lowerBound])
+        }
+        guard !src.isEmpty else { return nil }
+        let lower = src.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("file://") {
+            return URL(string: src)
+        }
+        let decoded = src.removingPercentEncoding ?? src
+        let expanded = (decoded as NSString).expandingTildeInPath
+        if expanded.hasPrefix("/") {
+            return URL(fileURLWithPath: expanded)
+        }
+        guard let folder = documentURL?.deletingLastPathComponent() else { return nil }
+        return folder.appendingPathComponent(decoded).standardizedFileURL
     }
 
     override func desiredHeight(for width: CGFloat) -> CGFloat {

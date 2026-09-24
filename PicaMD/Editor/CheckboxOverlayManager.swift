@@ -55,6 +55,8 @@ final class CheckboxOverlayManager {
     private var lastMatches: [TaskListMatch] = []
     private var lastCursorRanges: [NSRange] = []
     private var lastProtectedRanges: [NSRange] = []
+    private var lastAccent: NSColor?
+    private var lastBackground: NSColor?
 
     /// Cached size of one checkbox in points. Tuned so the box visually
     /// matches the cap-height of the editor's body font at the default
@@ -87,15 +89,20 @@ final class CheckboxOverlayManager {
         // Fast-path: if nothing that affects layout/visibility changed,
         // skip the full rebind loop. We must compute liveMatches first
         // (above) since it derives from protectedRanges.
+        let accent = theme.effectiveAccent
+        let bgFill = theme.palette.bg
         if liveMatches == lastMatches,
            cursorActiveRanges == lastCursorRanges,
-           protectedRanges == lastProtectedRanges {
+           protectedRanges == lastProtectedRanges,
+           accent == lastAccent, bgFill == lastBackground {
+            // Same checkboxes, but the text around them may have reflowed
+            // (resize, outline toggle, a math block reporting its height)
+            // — follow the glyphs instead of staying on the old lines.
+            reposition()
             return
         }
 
         let storageLength = textView.textStorage?.length ?? 0
-        let accent = theme.effectiveAccent
-        let bgFill = theme.palette.bg
 
         // Grow pool if we need more views.
         while pool.count < liveMatches.count {
@@ -150,6 +157,8 @@ final class CheckboxOverlayManager {
         lastMatches = liveMatches
         lastCursorRanges = cursorActiveRanges
         lastProtectedRanges = protectedRanges
+        lastAccent = accent
+        lastBackground = bgFill
     }
 
     /// Re-position visible views in response to scroll / resize. Cheap

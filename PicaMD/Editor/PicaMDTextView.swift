@@ -13,13 +13,18 @@ import UniformTypeIdentifiers
 /// All other keys fall through to the default behaviour.
 final class PicaMDTextView: NSTextView {
 
-    /// Master toggle for the smart-punctuation rewrites done in
-    /// `insertText(_:replacementRange:)`. Defaults to `true`; can be
-    /// disabled by user preference later.
-    var smartPunctuationEnabled: Bool = true
+    /// Smart punctuation (`--` → –, `...` → …, curly quotes). Off by
+    /// default: Markdown syntax is built from exactly these characters.
+    /// Settings ▸ Editing. Read per keystroke (a cheap defaults lookup) so
+    /// toggling applies to every open window immediately.
+    var smartPunctuationEnabled: Bool {
+        UserDefaults.standard.bool(forKey: EditorPreferences.smartPunctuationKey)
+    }
 
-    /// Master toggle for auto-pairing brackets/quotes. Defaults to `true`.
-    var autoPairEnabled: Bool = true
+    /// Auto-pairing of brackets, quotes and backticks. On by default.
+    var autoPairEnabled: Bool {
+        UserDefaults.standard.bool(forKey: EditorPreferences.autoPairKey)
+    }
 
     // MARK: - Find-bar match highlighting
 
@@ -182,7 +187,7 @@ final class PicaMDTextView: NSTextView {
     /// AI hook is opt-in and shouldn't surface in the override list
     /// before the user has explicitly enabled it.
     private func isAIPickerShortcut(_ event: NSEvent) -> Bool {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let mods = event.modifierFlags.intersection(KeyCombo.relevantModifiers)
         return mods == .control && event.keyCode == 0x31  // 0x31 = space
     }
 
@@ -192,7 +197,7 @@ final class PicaMDTextView: NSTextView {
     /// number row: 18=1, 19=2, 20=3, 21=4, 23=5, 22=6, 26=7,
     /// 28=8, 25=9.
     private func aiPresetDigit(for event: NSEvent) -> Int? {
-        let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        let mods = event.modifierFlags.intersection(KeyCombo.relevantModifiers)
         guard mods == [.control, .command] else { return nil }
         switch event.keyCode {
         case 18: return 1
@@ -233,6 +238,36 @@ final class PicaMDTextView: NSTextView {
         runPreset(preset)
     }
 
+    /// The in-flight AI request, if any. One at a time per editor: a
+    /// second hotkey press while waiting used to start a parallel request
+    /// that inserted twice (and left the caret stuck in its "busy" grey).
+    private var aiTask: Task<Void, Never>?
+    /// Identifies the running request, so a cancelled one that finishes
+    /// late can't clear the state of a newer one.
+    private var aiRequestID: UUID?
+    private var caretColorBeforeAI: NSColor?
+
+    /// Esc cancels a running AI request; otherwise it's the usual
+    /// NSTextView behaviour (completion).
+    override func cancelOperation(_ sender: Any?) {
+        if let task = aiTask {
+            task.cancel()
+            finishAIRequest(aiRequestID)
+            return
+        }
+        super.cancelOperation(sender)
+    }
+
+    private func finishAIRequest(_ id: UUID?) {
+        guard id == aiRequestID else { return }
+        aiTask = nil
+        aiRequestID = nil
+        if let color = caretColorBeforeAI {
+            insertionPointColor = color
+            caretColorBeforeAI = nil
+        }
+    }
+
     /// `⌃Space` opens the fuzzy picker. The picker dismisses itself,
     /// then calls back here with the chosen preset.
     private func openAIPickerSheet() {
@@ -256,20 +291,56 @@ final class PicaMDTextView: NSTextView {
     /// Dims the caret while the network call is in flight; restores
     /// it on completion / error.
     private func runPreset(_ preset: AIPreset) {
-        let busyColor = NSColor.disabledControlTextColor
-        let originalColor = self.insertionPointColor
-        self.insertionPointColor = busyColor
+        guard aiTask == nil else {
+            NSSound.beep()   // one request at a time; Esc cancels the running one
+            return
+        }
+        var instruction: String?
+        if preset.needsInstruction {
+            guard let asked = askForInstruction(presetName: preset.name) else { return }
+            instruction = asked
+        }
 
-        Task { @MainActor [weak self] in
-            defer { self?.insertionPointColor = originalColor }
-            guard let self = self else { return }
+        caretColorBeforeAI = insertionPointColor
+        insertionPointColor = NSColor.disabledControlTextColor
+
+        let requestID = UUID()
+        aiRequestID = requestID
+        aiTask = Task { @MainActor [weak self] in
             do {
-                try await AICommandExecutor.run(preset: preset, in: self)
+                guard let self else { return }
+                try await AICommandExecutor.run(preset: preset, instruction: instruction, in: self)
+                self.finishAIRequest(requestID)
+            } catch is CancellationError {
+                self?.finishAIRequest(requestID)
             } catch {
+                guard let self else { return }
+                let wasCurrent = self.aiRequestID == requestID
+                self.finishAIRequest(requestID)
+                guard wasCurrent else { return }
+                // Don't pop an alert for a window the user already closed.
+                guard self.window != nil else { return }
                 self.presentAlert(title: "AI command failed",
-                                   info: error.localizedDescription)
+                                  info: error.localizedDescription)
             }
         }
+    }
+
+    /// "What should the AI do?" — for presets that carry no instruction of
+    /// their own (like the starter "Custom prompt"). `nil` on Cancel.
+    private func askForInstruction(presetName: String) -> String? {
+        let alert = NSAlert()
+        alert.messageText = presetName
+        alert.informativeText = "What should the AI do with the selected text?"
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 320, height: 24))
+        field.placeholderString = "e.g. Turn this into a table"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Run")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        guard alert.runModal() == .alertFirstButtonReturn else { return nil }
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.isEmpty ? nil : text
     }
 
     private func presentAIDisabledHint() {
@@ -286,7 +357,7 @@ final class PicaMDTextView: NSTextView {
         alert.addButton(withTitle: "Open Settings")
         alert.addButton(withTitle: "Cancel")
         if alert.runModal() == .alertFirstButtonReturn {
-            NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+            SettingsOpener.open()
         }
     }
 
@@ -339,16 +410,44 @@ final class PicaMDTextView: NSTextView {
 
     /// Applies a `MarkdownEdits.Result` to the text view through
     /// `shouldChangeText` / `didChangeText` so that undo is preserved.
+    ///
+    /// Only the span that actually differs is replaced. Replacing the
+    /// whole storage (as this used to) gave every character the
+    /// attributes of character 0 — a concealed `#` made the entire
+    /// document invisible outside the re-highlighted viewport — and put a
+    /// full copy of the document on the undo stack for every `(` typed.
     private func applyResult(_ result: MarkdownEdits.Result, oldText: String) {
         guard result.text != oldText else {
             setSelectedRange(result.selection)
             return
         }
-        let fullRange = NSRange(location: 0, length: (oldText as NSString).length)
-        guard shouldChangeText(in: fullRange, replacementString: result.text) else { return }
-        textStorage?.replaceCharacters(in: fullRange, with: result.text)
+        let change = Self.minimalChange(from: oldText, to: result.text)
+        guard shouldChangeText(in: change.range, replacementString: change.replacement) else { return }
+        textStorage?.replaceCharacters(in: change.range, with: change.replacement)
         setSelectedRange(result.selection)
         didChangeText()
+    }
+
+    /// The smallest UTF-16 range of `old` that must be replaced (and with
+    /// what) to produce `new`: strip the common prefix and suffix.
+    static func minimalChange(from old: String, to new: String) -> (range: NSRange, replacement: String) {
+        let a = old as NSString
+        let b = new as NSString
+        let aLen = a.length, bLen = b.length
+        var prefix = 0
+        let maxPrefix = min(aLen, bLen)
+        while prefix < maxPrefix, a.character(at: prefix) == b.character(at: prefix) { prefix += 1 }
+        var suffix = 0
+        let maxSuffix = min(aLen, bLen) - prefix
+        while suffix < maxSuffix,
+              a.character(at: aLen - 1 - suffix) == b.character(at: bLen - 1 - suffix) { suffix += 1 }
+        // Never split a surrogate pair at either edge.
+        if prefix > 0, prefix < aLen, CFStringIsSurrogateLowCharacter(a.character(at: prefix)) { prefix -= 1 }
+        if suffix > 0, aLen - suffix > prefix,
+           CFStringIsSurrogateLowCharacter(a.character(at: aLen - suffix)) { suffix -= 1 }
+        let range = NSRange(location: prefix, length: aLen - prefix - suffix)
+        let replacement = b.substring(with: NSRange(location: prefix, length: bLen - prefix - suffix))
+        return (range, replacement)
     }
 
     // MARK: - Auto-pair + smart-punctuation hooks
@@ -374,8 +473,9 @@ final class PicaMDTextView: NSTextView {
             return
         }
 
-        // Auto-pair openings.
-        if autoPairEnabled, str.count == 1,
+        // Auto-pair openings. Skipped while composing (dead keys / IME:
+        // the backtick is a dead key on German layouts).
+        if autoPairEnabled, str.count == 1, !hasMarkedText(),
            let pair = MarkdownEdits.autoPair(input: str,
                                               in: textStorage?.string ?? "",
                                               selection: effectiveRange) {
@@ -387,7 +487,9 @@ final class PicaMDTextView: NSTextView {
         super.insertText(string, replacementRange: replacementRange)
 
         // After the default insert, try smart punctuation rewrites.
-        if smartPunctuationEnabled, str.count == 1,
+        if smartPunctuationEnabled, str.count == 1, !hasMarkedText(),
+           MarkdownEdits.smartPunctuationAllowed(in: textStorage?.string ?? "",
+                                                  at: selectedRange().location),
            let smart = MarkdownEdits.smartPunctuation(after: str,
                                                        in: textStorage?.string ?? "",
                                                        selection: selectedRange()) {

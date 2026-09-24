@@ -24,7 +24,22 @@ import AppKit
 @MainActor
 final class BlockOverlayManager {
     weak var textView: NSTextView?
-    var documentURL: URL?
+    /// The document's file URL, for resolving relative image paths.
+    /// The first highlight pass runs before the view is in a window, so
+    /// image overlays are often built while this is still nil — they then
+    /// showed "file not found" for every `./assets/…` image until the
+    /// line was edited. Drop them when the URL arrives so the next
+    /// `update` rebuilds them against the right folder.
+    var documentURL: URL? {
+        didSet {
+            guard documentURL != oldValue else { return }
+            for (id, entry) in entries where id.kind == .image {
+                entry.view.removeFromSuperview()
+                entries.removeValue(forKey: id)
+            }
+            probeHeightCache = probeHeightCache.filter { $0.key.kind != .image }
+        }
+    }
 
     /// Stable identity for a block across range shifts. `ordinal`
     /// disambiguates two byte-identical blocks (e.g. two `$$x$$`) so

@@ -21,23 +21,33 @@ import Security
 enum Keychain {
     static let service = "de.michaelwittmann.PicaMD.ai"
 
-    static func set(value: String, account: String) {
-        guard let data = value.data(using: .utf8) else { return }
-        // Delete any existing entry first; SecItemAdd otherwise errors
-        // out with `errSecDuplicateItem`. Two calls is the boring-but-
-        // bulletproof idiom Apple's own sample code uses.
-        delete(account: account)
-        let query: [String: Any] = [
+    /// Store `value`, returning the Keychain status (`errSecSuccess` on
+    /// success). Updates an existing item in place and only adds when
+    /// there is none — deleting first (as before) lost the old key for
+    /// good whenever the add then failed.
+    @discardableResult
+    static func set(value: String, account: String) -> OSStatus {
+        guard let data = value.data(using: .utf8) else { return errSecParam }
+        let match: [String: Any] = [
             kSecClass as String:        kSecClassGenericPassword,
             kSecAttrService as String:  service,
             kSecAttrAccount as String:  account,
-            kSecValueData as String:    data,
-            // Never sync to iCloud, never expose without the device
-            // being unlocked. Maximum local privacy.
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecAttrSynchronizable as String: false,
         ]
-        SecItemAdd(query as CFDictionary, nil)
+        let status = SecItemUpdate(match as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        guard status == errSecItemNotFound else {
+            if status != errSecSuccess { NSLog("PicaMD: Keychain update failed (\(status))") }
+            return status
+        }
+        var add = match
+        add[kSecValueData as String] = data
+        // Never sync to iCloud, never expose without the device
+        // being unlocked. Maximum local privacy.
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        add[kSecAttrSynchronizable as String] = false
+        let addStatus = SecItemAdd(add as CFDictionary, nil)
+        if addStatus != errSecSuccess { NSLog("PicaMD: Keychain add failed (\(addStatus))") }
+        return addStatus
     }
 
     static func get(account: String) -> String? {
@@ -50,6 +60,11 @@ enum Keychain {
         ]
         var result: AnyObject?
         let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status != errSecSuccess && status != errSecItemNotFound {
+            // Denied access prompt, locked keychain, … — worth a log line
+            // instead of silently looking like "no key configured".
+            NSLog("PicaMD: Keychain read failed (\(status))")
+        }
         guard status == errSecSuccess,
               let data = result as? Data,
               let string = String(data: data, encoding: .utf8) else {

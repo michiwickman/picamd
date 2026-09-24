@@ -23,38 +23,19 @@ enum HeadingExtractor {
         options: []
     )
 
-    /// Strip the most common Markdown and HTML markers from a heading
-    /// title so the outline sidebar shows just the readable text.
-    /// Doesn't try to be a full Markdown parser — `# **Bold** <u>x</u>`
-    /// becomes "Bold x".
+    private static let htmlTagRegex = try! NSRegularExpression(pattern: "</?[a-zA-Z][^>]*>")
+
+    /// Strip Markdown and HTML markup from a heading title so the outline
+    /// shows the text as the editor renders it: `# **Bold** <u>x</u>`
+    /// becomes "Bold x". Uses the editor's own concealment rules, so
+    /// `snake_case` or `a * b` stay intact (every `_`/`*` used to be
+    /// deleted), and no longer compiles nine regexes per heading on
+    /// every keystroke.
     static func plainText(from source: String) -> String {
-        var s = source
-        // Strip HTML tags first so their inner content is preserved.
-        if let regex = try? NSRegularExpression(pattern: "</?[a-zA-Z][^>]*>") {
-            let range = NSRange(location: 0, length: (s as NSString).length)
-            s = regex.stringByReplacingMatches(in: s, range: range, withTemplate: "")
-        }
-        // Markdown markup characters around runs of text: **bold**,
-        // *italic*, _underscores_, ~~strike~~, ==highlight==,
-        // `code`. Replace each marker with empty.
-        let markers = [
-            ("\\*\\*", ""), ("__", ""),
-            ("\\*", ""), ("_", ""),
-            ("~~", ""), ("==", ""),
-            ("`", ""),
-        ]
-        for (pattern, replacement) in markers {
-            if let regex = try? NSRegularExpression(pattern: pattern) {
-                let range = NSRange(location: 0, length: (s as NSString).length)
-                s = regex.stringByReplacingMatches(in: s, range: range, withTemplate: replacement)
-            }
-        }
-        // Markdown links: `[text](url)` → `text`
-        if let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\([^)]+\)"#) {
-            let range = NSRange(location: 0, length: (s as NSString).length)
-            s = regex.stringByReplacingMatches(in: s, range: range, withTemplate: "$1")
-        }
-        return s.trimmingCharacters(in: .whitespaces)
+        let range = NSRange(location: 0, length: (source as NSString).length)
+        let withoutTags = htmlTagRegex.stringByReplacingMatches(in: source, range: range, withTemplate: "")
+        return DocumentSearch.visibleText(from: withoutTags).text
+            .trimmingCharacters(in: .whitespaces)
     }
 
     static func extract(from source: String) -> [DocumentHeading] {

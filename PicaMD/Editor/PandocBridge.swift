@@ -32,6 +32,33 @@ enum PandocBridge {
         return nil
     }
 
+    /// Where TeX and Homebrew tools live. An app launched from Finder
+    /// gets PATH=/usr/bin:/bin:/usr/sbin:/sbin — without MacTeX's
+    /// /Library/TeX/texbin pandoc reports "pdflatex not found" even
+    /// with MacTeX installed.
+    private static let extraToolDirectories = [
+        "/Library/TeX/texbin", "/opt/homebrew/bin", "/usr/local/bin", "/opt/local/bin",
+    ]
+
+    private static func toolEnvironment() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let current = env["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+        env["PATH"] = (extraToolDirectories + [current]).joined(separator: ":")
+        return env
+    }
+
+    /// A Unicode-capable LaTeX engine if one is installed. pandoc's
+    /// default, pdflatex, stops at the first `→`, emoji or CJK character.
+    private static func pdfEngine() -> String? {
+        for engine in ["xelatex", "lualatex"] {
+            for dir in extraToolDirectories {
+                let path = "\(dir)/\(engine)"
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
+            }
+        }
+        return nil
+    }
+
     private static func whichOnPath(_ tool: String) -> URL? {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/which")
@@ -102,24 +129,34 @@ enum PandocBridge {
     /// We feed the source via stdin (-f markdown -) instead of writing
     /// it to a temp file. That's faster, leaves no debris, and avoids
     /// permission issues with sandboxed temp dirs.
+    /// `resourceDirectory` is the document's folder: relative image paths
+    /// (`./assets/…`, which PicaMD itself writes) resolve against it.
+    /// Without it pandoc ran in `/` and silently dropped every image.
     static func export(markdown source: String,
                         to outputURL: URL,
-                        format: Format) throws {
+                        format: Format,
+                        resourceDirectory: URL? = nil) throws {
         guard let pandoc = locate() else {
             throw ExportError.pandocNotInstalled
         }
 
         let process = Process()
         process.executableURL = pandoc
+        process.environment = toolEnvironment()
         var args: [String] = [
             "--from", "gfm+tex_math_dollars+pipe_tables+task_lists+strikeout",
             "--to", format.pandocFlag,
             "-o", outputURL.path,
             "--standalone"
         ]
-        // PDF needs a LaTeX engine. Default xelatex isn't always
-        // available — let pandoc pick.
+        if let dir = resourceDirectory {
+            process.currentDirectoryURL = dir
+            args += ["--resource-path", dir.path]
+        }
         if format == .pdf {
+            if let engine = pdfEngine() {
+                args += ["--pdf-engine", engine]
+            }
             args += ["--pdf-engine-opt=-interaction=nonstopmode"]
         }
         process.arguments = args
@@ -130,10 +167,27 @@ enum PandocBridge {
         process.standardError = stderrPipe
         process.standardOutput = FileHandle.nullDevice   // discarded — `-o` writes directly
 
+        // If pandoc exits before reading all of stdin (bad flag, old
+        // version), the write must fail with EPIPE instead of SIGPIPE
+        // killing the whole app.
+        signal(SIGPIPE, SIG_IGN)
+
         do {
             try process.run()
         } catch {
             throw ExportError.ioFailure(error.localizedDescription)
+        }
+
+        // Drain stderr concurrently. LaTeX is chatty: reading it only
+        // after exit deadlocked both processes once ~64 KB of warnings
+        // filled the pipe.
+        let stderrBuffer = StderrBuffer()
+        let drained = DispatchGroup()
+        let stderrHandle = stderrPipe.fileHandleForReading
+        drained.enter()
+        DispatchQueue.global(qos: .utility).async {
+            stderrBuffer.data = stderrHandle.readDataToEndOfFile()
+            drained.leave()
         }
 
         // Feed the source to pandoc's stdin in one go.
@@ -147,11 +201,16 @@ enum PandocBridge {
         }
 
         process.waitUntilExit()
+        drained.wait()
 
         if process.terminationStatus != 0 {
-            let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-            let stderr = String(data: stderrData, encoding: .utf8) ?? ""
+            let stderr = String(data: stderrBuffer.data, encoding: .utf8) ?? ""
             throw ExportError.nonZeroExit(code: process.terminationStatus, stderr: stderr)
         }
     }
+}
+
+/// Written once by the stderr reader, read after `drained.wait()`.
+private final class StderrBuffer: @unchecked Sendable {
+    var data = Data()
 }

@@ -35,6 +35,8 @@ enum EditorTiming {
     /// Find bar: refresh counts/highlights after the document is edited
     /// while the bar is open.
     static let searchRefreshDebounceMs: Int = 80
+    /// Outline, frontmatter bar and status-bar counts after an edit.
+    static let derivedStateDebounceMs: Int = 150
 }
 
 enum EditorLayout {
@@ -81,4 +83,19 @@ enum EditorBlockDefaults {
     static let image: CGFloat = 220
     static let mathBlock: CGFloat = 100
     static let mermaid: CGFloat = 200
+}
+
+/// User-facing editor behaviour toggles (Settings ▸ Editing), stored in
+/// `UserDefaults` and read directly by the text view at typing time.
+enum EditorPreferences {
+    static let autoPairKey = "PicaMD.editor.autoPair"
+    static let smartPunctuationKey = "PicaMD.editor.smartPunctuation"
+
+    /// Call once at launch, before any editor reads the keys.
+    static func registerDefaults(_ defaults: UserDefaults = .standard) {
+        defaults.register(defaults: [
+            autoPairKey: true,
+            smartPunctuationKey: false,
+        ])
+    }
 }

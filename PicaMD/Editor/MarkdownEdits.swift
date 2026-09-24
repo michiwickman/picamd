@@ -203,6 +203,9 @@ enum MarkdownEdits {
     /// can fall through to default insertion.
     static func autoPair(input: String, in text: String, selection: NSRange) -> Result? {
         guard input.count == 1, let ch = input.first else { return nil }
+        if selection.length == 0, !shouldAutoPair(ch, in: text, at: selection.location) {
+            return nil
+        }
         let pair: Character?
         switch ch {
         case "(": pair = ")"
@@ -222,7 +225,7 @@ enum MarkdownEdits {
             let replaced = String(ch) + inner + String(close)
             let mutable = NSMutableString(string: nsString)
             mutable.replaceCharacters(in: selection, with: replaced)
-            let newSel = NSRange(location: selection.location + 1, length: inner.count)
+            let newSel = NSRange(location: selection.location + 1, length: (inner as NSString).length)
             return Result(text: mutable as String, selection: newSel)
         } else {
             // Insert pair, place cursor between
@@ -232,6 +235,69 @@ enum MarkdownEdits {
             let newSel = NSRange(location: selection.location + 1, length: 0)
             return Result(text: mutable as String, selection: newSel)
         }
+    }
+
+    /// Whether typing `ch` at `location` (no selection) should insert
+    /// the closing half too. Pairing only makes sense where a new span
+    /// starts:
+    ///   - never right before a word (`(|word` stays `(word`);
+    ///   - `'` / `"` / `` ` `` not right after a letter or digit — that's
+    ///     an apostrophe (`don't`, `geht's`) or the end of a span;
+    ///   - `` ` `` not after another backtick, so typing a ``` fence gives
+    ///     exactly three backticks.
+    static func shouldAutoPair(_ ch: Character, in text: String, at location: Int) -> Bool {
+        let ns = text as NSString
+        guard location >= 0, location <= ns.length else { return false }
+        let next: Character? = location < ns.length
+            ? ns.substring(with: NSRange(location: location, length: 1)).first : nil
+        let prev: Character? = location > 0
+            ? ns.substring(with: NSRange(location: location - 1, length: 1)).first : nil
+        if let next, next.isLetter || next.isNumber || next == "_" { return false }
+        switch ch {
+        case "'", "\"":
+            if let prev, prev.isLetter || prev.isNumber || prev == ch { return false }
+        case "`":
+            if let prev, prev.isLetter || prev.isNumber || prev == "`" { return false }
+        default:
+            break
+        }
+        return true
+    }
+
+    /// Whether smart punctuation may rewrite text at `location`. Markdown
+    /// syntax is made of the very characters it replaces, so stay out of
+    /// code, frontmatter and HTML, and away from lines that are only
+    /// dashes / pipes / colons (`---` rules and frontmatter fences,
+    /// `|---|` table separators) — the old behaviour turned those into
+    /// em-dashes.
+    static func smartPunctuationAllowed(in text: String, at location: Int) -> Bool {
+        let ns = text as NSString
+        guard location > 0, location <= ns.length else { return false }
+        let lineRange = ns.lineRange(for: NSRange(location: location - 1, length: 0))
+        let linePrefix = ns.substring(with: NSRange(location: lineRange.location,
+                                                    length: location - lineRange.location))
+        let trimmed = linePrefix.trimmingCharacters(in: .whitespaces)
+        // Only-structural line so far: `---`, `|--`, `:--`, `- ` bullets.
+        if trimmed.allSatisfy({ "-|:–—".contains($0) }) { return false }
+        // Inside an inline code span: odd number of backticks before us.
+        if linePrefix.filter({ $0 == "`" }).count % 2 == 1 { return false }
+        // Inside an HTML tag / comment (`<a href="…">`, `<!-- … -->`).
+        if let lt = linePrefix.lastIndex(of: "<"), !linePrefix[lt...].contains(">") { return false }
+        // Inside a link destination `](…`.
+        if let open = linePrefix.range(of: "](", options: .backwards),
+           !linePrefix[open.upperBound...].contains(")") { return false }
+        // Fenced code block or frontmatter: count fences above the line.
+        let before = ns.substring(to: lineRange.location)
+        var inFence = false
+        var inFrontmatter = before.hasPrefix("---\n")
+        var lineIndex = 0
+        before.enumerateLines { line, _ in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if inFrontmatter && lineIndex > 0 && t == "---" { inFrontmatter = false }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") { inFence.toggle() }
+            lineIndex += 1
+        }
+        return !inFence && !inFrontmatter
     }
 
     /// If the cursor is right before `close` (e.g. `)` typed when the

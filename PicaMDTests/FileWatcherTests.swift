@@ -75,6 +75,31 @@ final class FileWatcherTests: XCTestCase {
         wait(for: [fired], timeout: 1.5)
     }
 
+    /// Other editors, git and the MCP sidecar save atomically (write a
+    /// temp file, rename it over ours). That must surface as `.modified`
+    /// (→ Reload prompt), and the watcher must follow the new inode so a
+    /// later change is still seen — it used to keep watching the dead one.
+    @MainActor
+    func testAtomicReplaceFiresModifiedAndKeepsWatching() throws {
+        let (watcher, url) = try makeFixture()
+        defer { watcher.stop(); try? FileManager.default.removeItem(at: url) }
+
+        let replaced = expectation(description: "atomic replace fires .modified")
+        watcher.startWatching(url)
+        watcher.onExternalChange = { event in
+            if case .modified = event { replaced.fulfill() }
+        }
+        try "replaced atomically\n".write(to: url, atomically: true, encoding: .utf8)
+        wait(for: [replaced], timeout: 2.0)
+
+        let later = expectation(description: "a later in-place write is still seen")
+        watcher.onExternalChange = { event in
+            if case .modified = event { later.fulfill() }
+        }
+        try appendInPlace("and appended\n", to: url)
+        wait(for: [later], timeout: 2.0)
+    }
+
     @MainActor
     func testStopClearsCurrentURL() throws {
         let (watcher, url) = try makeFixture()

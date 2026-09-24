@@ -73,12 +73,20 @@ struct KeyCombo: Equatable {
         return KeyCombo(key: last, modifiers: mods)
     }
 
+    /// The modifier keys shortcuts are built from.
+    static let relevantModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+
     /// Match the combo against an `NSEvent`. Modifiers must match
     /// exactly (so `cmd+1` doesn't fire when the user holds
     /// `cmd+shift+1`).
     func matches(_ event: NSEvent) -> Bool {
-        let eventMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let wantedMods = modifiers.intersection(.deviceIndependentFlagsMask)
+        // Compare only the modifiers a shortcut can be made of. The
+        // device-independent mask also keeps Caps Lock, and arrow keys
+        // always carry `.numericPad` + `.function` — with those included,
+        // ⌘⌥↑/↓ (move line) could never match and Caps Lock disabled
+        // every editor shortcut.
+        let eventMods = event.modifierFlags.intersection(Self.relevantModifiers)
+        let wantedMods = modifiers.intersection(Self.relevantModifiers)
         guard eventMods == wantedMods else { return false }
 
         // Named keys: arrow / escape / return / tab / space — match by keyCode.

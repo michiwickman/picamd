@@ -16,11 +16,14 @@ struct ContentView: View {
     /// Find/replace bar state for this window. Published to the Find
     /// command menu via `.focusedSceneValue(\.searchModel, …)`.
     @StateObject private var search = SearchModel()
-    /// Updated whenever the WindowAccessor's window's representedURL
-    /// changes — i.e. every time the user saves an Untitled doc or
-    /// opens a fresh file. Used to provide the suggested export
-    /// filename via `ActiveDocumentContext`.
-    @State private var documentURL: URL? = nil
+    /// Live accessors for the File ▸ Export commands (see
+    /// `ActiveDocumentContext`). One stable instance per window.
+    @State private var exportContext = ActiveDocumentContext()
+    /// Word / character / line counts for the status bar, and the
+    /// outline + frontmatter, are recomputed shortly after typing pauses
+    /// rather than on every keystroke (each is a full-document pass).
+    @State private var stats = TextStats()
+    @State private var derivedStateTask: Task<Void, Never>?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,7 +31,7 @@ struct ContentView: View {
             mainSplit
             if themeStore.theme.showStatusBar {
                 Divider()
-                StatusBar(text: document.text)
+                StatusBar(stats: stats)
             }
         }
         .background(Color(themeStore.theme.palette.bg))
@@ -39,12 +42,9 @@ struct ContentView: View {
         .background(WindowAccessor { window in
             window.tabbingMode = .preferred
             window.tabbingIdentifier = "de.michaelwittmann.PicaMD.document"
-            // Snapshot the URL once on first hookup; after that the
-            // window's `representedURL` is updated by AppKit's save
-            // pipeline. We don't poll — the export commands always
-            // use the latest `document.text`, and an "Untitled" name
-            // is fine while the doc has no on-disk URL yet.
-            documentURL = window.representedURL
+            // Export reads the window's representedURL at export time,
+            // so a document saved after opening exports under its name.
+            exportContext.window = window
         })
         // Publish per-window mode flags to the App's `Commands` block
         // via `@FocusedBinding`. The active window's bindings drive
@@ -53,13 +53,8 @@ struct ContentView: View {
         .focusedSceneValue(\.typewriterModeBinding, $typewriterMode)
         .focusedSceneValue(\.commandPaletteBinding, $commandPaletteOpen)
         .focusedSceneValue(\.searchModel, search)
-        // Publish a snapshot of the active doc's source + URL +
-        // palette so the File menu's Export commands can read them.
-        .focusedSceneValue(\.activeDocumentContext, ActiveDocumentContext(
-            source: document.text,
-            filename: documentURL?.lastPathComponent,
-            palette: themeStore.theme.palette
-        ))
+        // Stable reference with live accessors for the Export commands.
+        .focusedSceneValue(\.activeDocumentContext, exportContext)
         .sheet(isPresented: $commandPaletteOpen) {
             CommandPalette(isPresented: $commandPaletteOpen,
                             actions: commandPaletteActions)
@@ -67,12 +62,19 @@ struct ContentView: View {
         }
         .frame(minWidth: 700, idealWidth: 1100, minHeight: 400, idealHeight: 750)
         .onAppear {
-            recomputeHeadings(document.text)
-            recomputeFrontmatter(document.text)
+            recomputeDerivedState(document.text)
+            let binding = $document
+            let store = themeStore
+            exportContext.source = { binding.wrappedValue.text }
+            exportContext.palette = { store.theme.palette }
         }
         .onChange(of: document.text) { _, new in
-            recomputeHeadings(new)
-            recomputeFrontmatter(new)
+            derivedStateTask?.cancel()
+            derivedStateTask = Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(EditorTiming.derivedStateDebounceMs))
+                guard !Task.isCancelled else { return }
+                recomputeDerivedState(new)
+            }
         }
         .onChange(of: cursorLocation) { _, _ in updateActiveHeading() }
         .onChange(of: headings) { _, _ in updateActiveHeading() }
@@ -121,28 +123,32 @@ struct ContentView: View {
     @ViewBuilder
     private var editorPane: some View {
         let theme = themeStore.theme
-        let editor = MarkdownTextView(text: $document.text,
-                                       jumpToken: $jumpToken,
-                                       cursorLocation: $cursorLocation,
-                                       theme: theme,
-                                       focusMode: focusMode,
-                                       typewriterMode: typewriterMode,
-                                       search: search)
-        Group {
-            if theme.preset == .tahoe {
-                editor
-                    .background(Color(theme.palette.bg))
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 12, style: .continuous)
-                            .stroke(Color(theme.palette.rule), lineWidth: 1)
-                    )
-                    .padding(EdgeInsets(top: 14, leading: 16, bottom: 14, trailing: 16))
-                    .background(Color(theme.palette.bgTint))
-            } else {
-                editor
-            }
-        }
+        // One view tree for every preset. Switching between an if/else
+        // pair of branches gave the editor a new SwiftUI identity, which
+        // rebuilt it in every window — caret, scroll position and undo
+        // history lost on each Tahoe ⇄ other-preset change.
+        let isCard = theme.preset == .tahoe
+        let radius: CGFloat = isCard ? EditorLayout.tahoeCardCornerRadius : 0
+        MarkdownTextView(text: $document.text,
+                         jumpToken: $jumpToken,
+                         cursorLocation: $cursorLocation,
+                         theme: theme,
+                         focusMode: focusMode,
+                         typewriterMode: typewriterMode,
+                         search: search)
+            .background(Color(theme.palette.bg))
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .stroke(isCard ? Color(theme.palette.rule) : .clear, lineWidth: 1)
+            )
+            .padding(isCard
+                     ? EdgeInsets(top: EditorLayout.tahoeCardPaddingTop,
+                                  leading: EditorLayout.tahoeCardPaddingHorizontal,
+                                  bottom: EditorLayout.tahoeCardPaddingTop,
+                                  trailing: EditorLayout.tahoeCardPaddingHorizontal)
+                     : EdgeInsets())
+            .background(Color(isCard ? theme.palette.bgTint : theme.palette.bg))
         .overlay(alignment: .topTrailing) {
             if search.isOpen {
                 SearchBarView(model: search)
@@ -150,6 +156,13 @@ struct ContentView: View {
             }
         }
         .animation(.easeOut(duration: 0.15), value: search.isOpen)
+    }
+
+    private func recomputeDerivedState(_ text: String) {
+        recomputeHeadings(text)
+        recomputeFrontmatter(text)
+        let new = TextStats(text)
+        if new != stats { stats = new }
     }
 
     private func recomputeHeadings(_ text: String) {
@@ -174,11 +187,13 @@ struct ContentView: View {
         var actions: [CommandPaletteAction] = []
 
         // Headings → jump tokens
-        for h in headings {
+        let lineNumbers = TextStats.lineNumbers(at: headings.map(\.lineRange.location),
+                                                in: document.text)
+        for (i, h) in headings.enumerated() {
             let prefix = String(repeating: "#", count: h.level) + " "
             actions.append(.init(
                 title: h.text,
-                subtitle: prefix + "(line \(h.lineRange.location))",
+                subtitle: prefix + "(line \(lineNumbers[i]))",
                 icon: "number",
                 perform: {
                     activeHeadingID = h.id
@@ -206,9 +221,7 @@ struct ContentView: View {
             .init(title: "Open Settings…",
                    subtitle: "Theme, palette, accent, typography · ⌘,",
                    icon: "gear",
-                   perform: {
-                       NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
-                   }),
+                   perform: { SettingsOpener.open() }),
         ])
 
         return actions
@@ -234,14 +247,54 @@ struct ContentView: View {
     }
 }
 
+/// Document counts for the status bar, computed in one pass.
+struct TextStats: Equatable {
+    var words = 0
+    var characters = 0
+    var lines = 0
+
+    init() {}
+
+    init(_ text: String) {
+        characters = text.count
+        guard !text.isEmpty else { return }
+        var inWord = false
+        var newlines = 0
+        for scalar in text.unicodeScalars {
+            let isSpace = CharacterSet.whitespacesAndNewlines.contains(scalar)
+            if !isSpace && !inWord { words += 1 }
+            inWord = !isSpace
+            if scalar == "\n" { newlines += 1 }
+        }
+        lines = newlines + 1
+    }
+
+    /// 1-based line numbers for ascending UTF-16 `offsets`, in one pass.
+    static func lineNumbers(at offsets: [Int], in text: String) -> [Int] {
+        var result: [Int] = []
+        result.reserveCapacity(offsets.count)
+        var line = 1
+        var position = 0
+        var iterator = text.utf16.makeIterator()
+        for offset in offsets {
+            while position < offset, let unit = iterator.next() {
+                if unit == 0x0A { line += 1 }
+                position += 1
+            }
+            result.append(line)
+        }
+        return result
+    }
+}
+
 private struct StatusBar: View {
-    let text: String
+    let stats: TextStats
 
     var body: some View {
         HStack(spacing: 16) {
-            Text("\(wordCount) words")
-            Text("\(charCount) chars")
-            Text("\(lineCount) lines")
+            Text("\(stats.words) words")
+            Text("\(stats.characters) chars")
+            Text("\(stats.lines) lines")
             Spacer()
         }
         .font(.system(size: 11))
@@ -252,14 +305,4 @@ private struct StatusBar: View {
         .background(.bar)
     }
 
-    private var wordCount: Int {
-        text.split(whereSeparator: { $0.isWhitespace || $0.isNewline })
-            .filter { !$0.isEmpty }
-            .count
-    }
-    private var charCount: Int { text.count }
-    private var lineCount: Int {
-        if text.isEmpty { return 0 }
-        return text.components(separatedBy: "\n").count
-    }
 }

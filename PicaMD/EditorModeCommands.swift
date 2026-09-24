@@ -26,14 +26,20 @@ private struct SearchModelKey: FocusedValueKey {
     typealias Value = SearchModel
 }
 
-/// Read-only snapshot of what the active window's editor is currently
-/// holding, surfaced to the App's `Commands` block via `@FocusedValue`
-/// so the File menu's export actions can reach the source text without
-/// having to bridge through `NSDocumentController`.
-struct ActiveDocumentContext {
-    let source: String
-    let filename: String?
-    let palette: Palette
+/// What the File menu's export actions need from the active window,
+/// surfaced via `@FocusedValue`. A stable reference whose accessors read
+/// the live values at export time: publishing a struct with the whole
+/// document text changed the focused value on every keystroke (menu
+/// updates each time), and the filename captured once at window-open
+/// stayed "Untitled" after the first save.
+@MainActor
+final class ActiveDocumentContext {
+    var source: () -> String = { "" }
+    var palette: () -> Palette? = { nil }
+    weak var window: NSWindow?
+
+    /// The document's current file URL (nil while untitled).
+    var fileURL: URL? { window?.representedURL }
 }
 
 extension FocusedValues {

@@ -71,6 +71,10 @@ final class ToolRegistry {
     ///   { "name": "…", "arguments": { … } }
     /// We return the standard MCP content-block shape:
     ///   { "content": [ { "type": "text", "text": "…" } ] }
+    func hasTool(named name: String) -> Bool {
+        tools[name] != nil
+    }
+
     func invoke(params: [String: Any]) throws -> [String: Any] {
         guard let name = params["name"] as? String else {
             throw MCPError("missing tool name")
@@ -98,9 +102,11 @@ final class ToolRegistry {
                 throw MCPError("tool \(name): result is not JSON-serializable (\(type(of: result)))")
             }
             do {
+                // Compact + unescaped slashes: every byte here is a
+                // token the model pays for.
                 let data = try JSONSerialization.data(
                     withJSONObject: result,
-                    options: [.prettyPrinted, .sortedKeys]
+                    options: [.sortedKeys, .withoutEscapingSlashes]
                 )
                 guard let s = String(data: data, encoding: .utf8) else {
                     throw MCPError("tool \(name): JSON data is not valid UTF-8")

@@ -6,7 +6,8 @@
   signs the release zip with `sign_update` and adds a new <item>
   to the top of <channel>. Sparkle's auto-update loop in the app
   fetches this XML, picks the highest sparkle:version newer than
-  the running build, and offers it to the user.
+  the running build (CFBundleVersion — the build number release.sh
+  prints), and offers it to the user.
 
   The sparkle:edSignature is an EdDSA signature over the zip;
   Sparkle verifies it against SUPublicEDKey from Info.plist before
@@ -19,7 +20,7 @@
   <channel>
     <title>PicaMD Updates</title>
     <link>https://raw.githubusercontent.com/michiwickman/picamd/main/appcast.xml</link>
-    <description>Updates for PicaMD — native macOS Markdown editor for the Claude era.</description>
+    <description>Updates for PicaMD, a small native Markdown editor and viewer for macOS.</description>
     <language>en</language>
 
     <item>

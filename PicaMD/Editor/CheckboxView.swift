@@ -79,7 +79,12 @@ final class CheckboxView: NSView {
 
     /// Space-bar toggles when the view has keyboard focus.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.charactersIgnoringModifiers == " " {
+        // Key equivalents are offered to every view in the window, so
+        // without these checks ⌃Space (the AI picker) toggled the first
+        // checkbox in the document.
+        let mods = event.modifierFlags.intersection(KeyCombo.relevantModifiers)
+        if window?.firstResponder === self, mods.isEmpty,
+           event.charactersIgnoringModifiers == " " {
             onToggle?()
             return true
         }
@@ -120,6 +125,12 @@ final class CheckboxView: NSView {
         // onto the line, which feels wrong (clicking a checkbox should
         // toggle, not navigate).
         onToggle?()
+        // Accepting first responder (for keyboard access) means the click
+        // just took focus from the editor — hand it back so typing
+        // continues where the caret was.
+        if let editor = superview as? NSTextView {
+            window?.makeFirstResponder(editor)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {

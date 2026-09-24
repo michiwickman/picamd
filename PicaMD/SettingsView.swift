@@ -1,4 +1,23 @@
 import SwiftUI
+import AppKit
+import Security
+
+/// Opens the Settings window from code that isn't a SwiftUI view (an
+/// NSAlert button, a palette action). `showSettingsWindow:` stopped
+/// working on macOS 14 — it only logs "Please use SettingsLink" — so
+/// this performs the app menu's own Settings… item (⌘,) instead.
+@MainActor
+enum SettingsOpener {
+    static func open() {
+        guard let appMenu = NSApp.mainMenu?.items.first?.submenu else { return }
+        let index = appMenu.items.firstIndex {
+            $0.keyEquivalent == "," && $0.keyEquivalentModifierMask == .command
+        }
+        if let index {
+            appMenu.performActionForItem(at: index)
+        }
+    }
+}
 
 /// macOS-native settings sheet. Lives behind ⌘,. Sections mirror the
 /// Tweaks panel from the Claude design package.
@@ -57,6 +76,10 @@ private struct AITab: View {
 private struct AIProviderTab: View {
     @State private var config: AIConfig = AIConfig.load()
     @State private var apiKeys: [String: String] = [:]
+    /// Providers with a key in the Keychain. Cached instead of querying
+    /// the Keychain from `body` on every render.
+    @State private var storedKeys: Set<AIProvider> = []
+    @State private var keychainError: String?
 
     var body: some View {
         Form {
@@ -120,7 +143,7 @@ private struct AIProviderTab: View {
                         .onSubmit { saveAPIKey(for: provider) }
 
                         HStack {
-                            if Keychain.get(account: provider.keychainAccount) != nil {
+                            if storedKeys.contains(provider) {
                                 Label("Key stored in Keychain",
                                        systemImage: "checkmark.shield.fill")
                                     .font(.system(size: 11))
@@ -132,6 +155,7 @@ private struct AIProviderTab: View {
                             Button("Remove") {
                                 Keychain.delete(account: provider.keychainAccount)
                                 apiKeys[provider.rawValue] = ""
+                                refreshStoredKeys()
                             }
                             .disabled(!config.enabled)
                         }
@@ -140,16 +164,37 @@ private struct AIProviderTab: View {
             }
         }
         .padding(.top, 8)
+        .onAppear { refreshStoredKeys() }
+        .alert("Couldn't save the API key",
+               isPresented: Binding(get: { keychainError != nil },
+                                    set: { if !$0 { keychainError = nil } })) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(keychainError ?? "")
+        }
+    }
+
+    private func refreshStoredKeys() {
+        storedKeys = Set(AIProvider.allCases.filter {
+            Keychain.get(account: $0.keychainAccount) != nil
+        })
     }
 
     private func saveAPIKey(for provider: AIProvider) {
         let value = (apiKeys[provider.rawValue] ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return }
-        Keychain.set(value: value, account: provider.keychainAccount)
+        let status = Keychain.set(value: value, account: provider.keychainAccount)
+        guard status == errSecSuccess else {
+            // Keep the typed key in the field so nothing is lost.
+            keychainError = (SecCopyErrorMessageString(status, nil) as String?)
+                ?? "Keychain error \(status)."
+            return
+        }
         // Clear the field after save so the secret doesn't sit in
         // memory longer than necessary.
         apiKeys[provider.rawValue] = ""
+        refreshStoredKeys()
     }
 }
 
@@ -524,6 +569,8 @@ private struct TypographyTab: View {
 
 private struct BlocksTab: View {
     @EnvironmentObject private var themeStore: ThemeStore
+    @AppStorage(EditorPreferences.autoPairKey) private var autoPair = true
+    @AppStorage(EditorPreferences.smartPunctuationKey) private var smartPunctuation = false
 
     var body: some View {
         Form {
@@ -544,6 +591,17 @@ private struct BlocksTab: View {
                     get: { themeStore.theme.showStatusBar },
                     set: { themeStore.setShowStatusBar($0) }
                 ))
+            }
+
+            Section {
+                Toggle("Auto-pair brackets and quotes", isOn: $autoPair)
+                Toggle("Smart punctuation (– — … “ ”)", isOn: $smartPunctuation)
+            } header: {
+                Text("Editing")
+            } footer: {
+                Text("Smart punctuation rewrites what you type and stays out of code, frontmatter and HTML. Markdown syntax like `---` and `|---|` is left alone.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)

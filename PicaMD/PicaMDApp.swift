@@ -5,6 +5,7 @@ import AppKit
 struct PicaMDApp: App {
     @StateObject private var themeStore = ThemeStore()
     @StateObject private var updater = UpdaterController()
+    @ObservedObject private var recents = RecentDocumentsMenuModel.shared
 
     /// Hooks the launch-time "no document open" path to present the
     /// welcome window (recents + New + Open) instead of a Finder panel.
@@ -38,6 +39,7 @@ struct PicaMDApp: App {
         // lazily, so `ThemeStore()` and `AIConfig.load()` haven't fired
         // yet at this point — they'll see the freshly-migrated keys.
         UserDefaultsMigration.migrateFromQuickMDIfNeeded()
+        EditorPreferences.registerDefaults()
 
         // Register the services provider with AppKit. Has to happen
         // before any service is invoked; init() runs once per app
@@ -72,6 +74,27 @@ struct PicaMDApp: App {
                     NSDocumentController.shared.newDocument(nil)
                 }
                 .keyboardShortcut("t", modifiers: .command)
+                // Replacing `.newItem` also removes the stock Open… and
+                // Open Recent, which left ⌘O dead in document windows.
+                Button("Open…") {
+                    NSDocumentController.shared.openDocument(nil)
+                }
+                .keyboardShortcut("o", modifiers: .command)
+                Menu("Open Recent") {
+                    ForEach(recents.urls, id: \.self) { url in
+                        Button(url.lastPathComponent) {
+                            NSDocumentController.shared.openDocument(
+                                withContentsOf: url, display: true) { _, _, _ in }
+                        }
+                    }
+                    if !recents.urls.isEmpty {
+                        Divider()
+                    }
+                    Button("Clear Menu") {
+                        RecentDocumentsStore.clear()
+                    }
+                    .disabled(recents.urls.isEmpty)
+                }
             }
             FindCommands()
             EditorModeCommands()

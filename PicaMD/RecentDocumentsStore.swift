@@ -3,11 +3,11 @@ import Foundation
 /// Most-recently-opened document paths, persisted in UserDefaults.
 ///
 /// SwiftUI's `DocumentGroup` does NOT populate
-/// `NSDocumentController.recentDocumentURLs` (PicaMD has no "Open Recent"
-/// menu and that list stays empty), so we track recents ourselves: a URL
-/// is recorded whenever a document's `representedURL` is established
-/// (open or first save) — see `MarkdownTextView.Coordinator`. The welcome
-/// window reads this list.
+/// `NSDocumentController.recentDocumentURLs`, so we track recents
+/// ourselves: a URL is recorded whenever a document's `representedURL` is
+/// established (open or first save) — see `MarkdownTextView.Coordinator`.
+/// The welcome window and File ▸ Open Recent read this list.
+@MainActor
 enum RecentDocumentsStore {
     private static let key = "PicaMD.recentDocuments.v1"
     private static let maxCount = 12
@@ -21,6 +21,7 @@ enum RecentDocumentsStore {
         paths.insert(path, at: 0)
         if paths.count > maxCount { paths = Array(paths.prefix(maxCount)) }
         UserDefaults.standard.set(paths, forKey: key)
+        RecentDocumentsMenuModel.shared.refresh()
     }
 
     /// Recent document URLs, most-recent first, filtered to those that
@@ -33,5 +34,20 @@ enum RecentDocumentsStore {
 
     static func clear() {
         UserDefaults.standard.removeObject(forKey: key)
+        RecentDocumentsMenuModel.shared.refresh()
+    }
+}
+
+/// Observable mirror of the recents list for File ▸ Open Recent.
+@MainActor
+final class RecentDocumentsMenuModel: ObservableObject {
+    static let shared = RecentDocumentsMenuModel()
+    @Published private(set) var urls: [URL] = []
+
+    private init() { refresh() }
+
+    func refresh() {
+        let current = RecentDocumentsStore.urls()
+        if current != urls { urls = current }
     }
 }

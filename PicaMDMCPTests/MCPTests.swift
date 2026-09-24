@@ -304,6 +304,19 @@ final class ToolImplementationTests: XCTestCase {
         XCTAssertEqual(after, "line 1\nREPLACED\nline 5")
     }
 
+    func testReplaceLinesTreatsATrailingNewlineAsTheTerminator() throws {
+        let original = (1...3).map { "line \($0)" }.joined(separator: "\n")
+        try original.write(toFile: tempPath, atomically: true, encoding: .utf8)
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any,
+            "start": 2,
+            "end": 2,
+            "text": "NEW\n",
+        ])
+        let after = try String(contentsOfFile: tempPath, encoding: .utf8)
+        XCTAssertEqual(after, "line 1\nNEW\nline 3", "no stray blank line")
+    }
+
     func testReadSectionReturnsHeadingSubtree() throws {
         let source = """
         # Doc

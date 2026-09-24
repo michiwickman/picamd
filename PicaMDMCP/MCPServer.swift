@@ -64,24 +64,36 @@ final class MCPServer {
         }
         let params = request["params"] as? [String: Any] ?? [:]
 
+        // A message without an `id` is a notification (initialized,
+        // cancelled, progress, …). JSON-RPC 2.0 forbids answering one —
+        // replying with an id-less error, as unknown notifications used
+        // to get, is an invalid message the client can't match.
+        guard id != nil else { return }
+
         switch method {
         case "initialize":
             sendResult(write: write, id: id, result: handleInitialize(params: params))
-
-        case "notifications/initialized":
-            return  // notifications never get a response
 
         case "tools/list":
             sendResult(write: write, id: id, result: registry.toolsListResult())
 
         case "tools/call":
+            // An unknown tool is a protocol error; a tool that ran and
+            // failed is a *result* with `isError: true`, so the model sees
+            // the message and can correct its call (MCP spec).
+            guard let name = params["name"] as? String, registry.hasTool(named: name) else {
+                sendError(write: write, id: id, code: -32602,
+                          message: "unknown tool: \(params["name"] as? String ?? "<missing>")")
+                return
+            }
             do {
                 let result = try registry.invoke(params: params)
                 sendResult(write: write, id: id, result: result)
             } catch {
-                sendError(write: write, id: id,
-                           code: -32000,
-                           message: error.localizedDescription)
+                sendResult(write: write, id: id, result: [
+                    "content": [["type": "text", "text": error.localizedDescription]],
+                    "isError": true,
+                ])
             }
 
         case "ping":

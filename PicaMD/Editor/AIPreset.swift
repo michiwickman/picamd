@@ -51,12 +51,35 @@ struct AIPreset: Codable, Equatable, Identifiable {
     /// If the template doesn't contain the placeholder, we APPEND the
     /// selection on a new line — that's friendlier than silently
     /// dropping the user's text when they edited a template wrong.
-    func resolvePrompt(selection: String) -> String {
-        let placeholder = "{{selection}}"
-        if userPromptTemplate.contains(placeholder) {
-            return userPromptTemplate.replacingOccurrences(of: placeholder, with: selection)
+    func resolvePrompt(selection: String, instruction: String? = nil) -> String {
+        var template = userPromptTemplate
+        if let instruction, !instruction.isEmpty {
+            if template.contains(Self.instructionPlaceholder) {
+                template = template.replacingOccurrences(of: Self.instructionPlaceholder, with: instruction)
+            } else {
+                template = instruction + "\n\n" + template
+            }
         }
-        return userPromptTemplate + "\n\n" + selection
+        let placeholder = "{{selection}}"
+        if template.contains(placeholder) {
+            return template.replacingOccurrences(of: placeholder, with: selection)
+        }
+        return template + "\n\n" + selection
+    }
+
+    /// `{{prompt}}` in a template means "ask me what to do each time".
+    static let instructionPlaceholder = "{{prompt}}"
+
+    /// Whether running this preset should first ask the user for an
+    /// instruction: its template says so, or it carries no instruction
+    /// at all (no system prompt and a bare `{{selection}}` template —
+    /// the starter "Custom prompt" preset), which would otherwise send
+    /// the selection with nothing to do.
+    var needsInstruction: Bool {
+        if userPromptTemplate.contains(Self.instructionPlaceholder) { return true }
+        let hasSystem = !(systemPrompt?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let bare = userPromptTemplate.trimmingCharacters(in: .whitespacesAndNewlines) == "{{selection}}"
+        return !hasSystem && bare
     }
 }
 
@@ -66,8 +89,8 @@ extension AIPreset {
     /// 9 built-in presets the user can immediately try after enabling
     /// AI. Their hotkeys are pre-bound to ⌃⌘1…⌃⌘9.
     ///
-    /// They're written so each one has a `<= 200`-token output ceiling
-    /// for snappy UX, and so each is genuinely useful for the *same*
+    /// They're written to keep answers short for snappy UX, and so
+    /// each is genuinely useful for the *same*
     /// kind of writing tasks the user said they care about: drafts,
     /// project notes, README-style docs.
     static let defaults: [AIPreset] = [
@@ -139,7 +162,7 @@ extension AIPreset {
             id: UUID(),
             name: "Custom prompt",
             systemPrompt: nil,
-            userPromptTemplate: "{{selection}}",
+            userPromptTemplate: "{{prompt}}\n\n{{selection}}",
             insertionMode: .appendBelow,
             hotkey: 9
         ),

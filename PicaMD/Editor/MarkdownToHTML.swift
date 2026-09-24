@@ -49,12 +49,16 @@ enum MarkdownToHTML {
         // HTML escaping.
         let footnoteIndex = FootnoteIndex.build(from: body)
         let withFootnotes = preprocessFootnotes(body, index: footnoteIndex)
-        let preprocessed = preprocessHighlights(withFootnotes)
+        // Math goes around the Markdown parser: it would otherwise turn
+        // `\\` into `\`, eat `\{`, and read `a_1 + b_1` as emphasis, so
+        // KaTeX never saw the formula the author wrote.
+        let (mathFree, mathSpans) = protectMath(in: withFootnotes)
+        let preprocessed = preprocessHighlights(mathFree)
 
         // Parse + visit.
         let document = Document(parsing: preprocessed)
         var visitor = HTMLVisitor()
-        var html = visitor.visit(document)
+        var html = restoreMath(in: visitor.visit(document), spans: mathSpans)
 
         if !footnoteIndex.refs.isEmpty {
             html += renderFootnoteBlock(index: footnoteIndex)
@@ -76,8 +80,11 @@ enum MarkdownToHTML {
         }
         let nsSource = source as NSString
         let result = NSMutableString(string: source)
+        let code = FootnoteIndex.codeRanges(in: source)
         let matches = regex.matches(in: source, options: [],
                                      range: NSRange(location: 0, length: nsSource.length))
+            // `if (a == b || c == d)` in code is code, not a highlight.
+            .filter { m in !code.contains { NSIntersectionRange($0, m.range).length > 0 } }
         // Replace right-to-left so earlier-match indexes stay valid.
         for m in matches.reversed() {
             guard m.numberOfRanges >= 2 else { continue }
@@ -105,11 +112,12 @@ enum MarkdownToHTML {
         if let defRegex = try? NSRegularExpression(
             pattern: #"(?m)^\[\^([^\]]+)\]:[ \t]+[\s\S]*?(?=\n\n|\n\[\^|\z)"#
         ) {
+            let defCode = FootnoteIndex.codeRanges(in: result as String)
             let matches = defRegex.matches(
                 in: result as String,
                 options: [],
                 range: NSRange(location: 0, length: result.length)
-            )
+            ).filter { m in !defCode.contains { NSLocationInRange(m.range.location, $0) } }
             for m in matches.reversed() {
                 // Drop the trailing blank line too (regex stops *at* `\n\n`)
                 // by extending one extra newline if there's one right after.
@@ -128,11 +136,12 @@ enum MarkdownToHTML {
         //    against the current `result` to keep ranges valid.
         let refRegex = try? NSRegularExpression(pattern: #"\[\^([^\]]+)\]"#)
         guard let refRegex = refRegex else { return result as String }
+        let refCode = FootnoteIndex.codeRanges(in: result as String)
         let refMatches = refRegex.matches(
             in: result as String,
             options: [],
             range: NSRange(location: 0, length: result.length)
-        )
+        ).filter { m in !refCode.contains { NSLocationInRange(m.range.location, $0) } }
         // Map `id` → 1-based number. First-encountered wins.
         var idToNumber: [String: Int] = [:]
         var counter = 0
@@ -157,6 +166,101 @@ enum MarkdownToHTML {
         }
 
         return result as String
+    }
+
+    // MARK: - Math protection
+
+    private static let displayMathRegex = try! NSRegularExpression(
+        pattern: #"(?m)^\$\$(?:(?=[^\n]*\$\$[ \t]*$)[^\n]*|[^\n]*\n[\s\S]*?^\$\$)[ \t]*$"#)
+    private static let inlineMathRegex = try! NSRegularExpression(
+        pattern: #"(?<![\\$])\$(?!\s)[^$\n]+?(?<![\s\\])\$(?!\$)"#)
+
+    /// Swap every math span (outside code) for an opaque alphanumeric
+    /// token the Markdown parser leaves alone; `restoreMath` puts the
+    /// original source back, HTML-escaped, for KaTeX to typeset.
+    static func protectMath(in source: String) -> (String, [(token: String, math: String)]) {
+        let ns = source as NSString
+        let full = NSRange(location: 0, length: ns.length)
+        let code = FootnoteIndex.codeRanges(in: source)
+        func isFree(_ r: NSRange, _ taken: [NSRange]) -> Bool {
+            !(code + taken).contains { NSIntersectionRange($0, r).length > 0 }
+        }
+        var ranges: [NSRange] = []
+        for m in displayMathRegex.matches(in: source, range: full) where isFree(m.range, ranges) {
+            ranges.append(m.range)
+        }
+        for m in inlineMathRegex.matches(in: source, range: full) where isFree(m.range, ranges) {
+            ranges.append(m.range)
+        }
+        guard !ranges.isEmpty else { return (source, []) }
+        let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "")
+        var spans: [(token: String, math: String)] = []
+        let result = NSMutableString(string: source)
+        for (i, r) in ranges.sorted(by: { $0.location > $1.location }).enumerated() {
+            let token = "PicaMDMath\(nonce)N\(i)E"
+            spans.append((token, ns.substring(with: r)))
+            result.replaceCharacters(in: r, with: token)
+        }
+        return (result as String, spans)
+    }
+
+    static func restoreMath(in html: String, spans: [(token: String, math: String)]) -> String {
+        var out = html
+        for span in spans {
+            out = out.replacingOccurrences(of: span.token, with: htmlEscape(span.math))
+        }
+        return out
+    }
+
+    // MARK: - URL safety
+
+    /// Whether a link / image destination is safe to emit: relative,
+    /// a fragment, or an allow-listed scheme. Blocks `javascript:`,
+    /// `vbscript:` and `data:` (except images) — also when disguised
+    /// with entities, case or embedded whitespace.
+    static func isSafeURL(_ raw: String, allowDataImages: Bool = false) -> Bool {
+        var scalars = String.UnicodeScalarView()
+        for scalar in decodeNumericEntities(raw).unicodeScalars
+        where scalar.value > 0x20 && scalar.value != 0x7F {
+            scalars.append(scalar)
+        }
+        let cleaned = String(scalars).lowercased()
+        guard let colon = cleaned.firstIndex(of: ":") else { return true }
+        // A colon after `/`, `?` or `#` is part of a path, not a scheme.
+        if let delimiter = cleaned.firstIndex(where: { "/?#".contains($0) }), delimiter < colon {
+            return true
+        }
+        let scheme = String(cleaned[..<colon])
+        if ["http", "https", "mailto", "tel", "ftp", "file"].contains(scheme) { return true }
+        return allowDataImages && cleaned.hasPrefix("data:image/")
+    }
+
+    private static let entityRegex = try! NSRegularExpression(
+        pattern: #"&#(x[0-9a-fA-F]+|[0-9]+);?|&colon;"#, options: [.caseInsensitive])
+
+    /// Decode `&#NN;` / `&#xNN;` and `&colon;` — the usual ways of hiding
+    /// `javascript:` from a naive filter.
+    static func decodeNumericEntities(_ s: String) -> String {
+        guard s.contains("&") else { return s }
+        let ns = s as NSString
+        let regex = entityRegex
+        var out = ""
+        var last = 0
+        for m in regex.matches(in: s, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+            let whole = ns.substring(with: m.range)
+            if whole.lowercased() == "&colon;" {
+                out += ":"
+            } else {
+                let body = ns.substring(with: m.range(at: 1))
+                let value = body.hasPrefix("x") || body.hasPrefix("X")
+                    ? UInt32(body.dropFirst(), radix: 16) : UInt32(body)
+                if let value, let scalar = Unicode.Scalar(value) { out.unicodeScalars.append(scalar) }
+            }
+            last = NSMaxRange(m.range)
+        }
+        out += ns.substring(from: last)
+        return out
     }
 
     /// Render the footer that lists each footnote definition.
@@ -245,7 +349,7 @@ enum MarkdownToHTML {
                     throwOnError: false
                 });"></script>
         <script type="module">
-            import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@10.9.1/dist/mermaid.esm.min.mjs";
+            import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.14.0/dist/mermaid.esm.min.mjs";
             mermaid.initialize({ startOnLoad: true, theme: 'default' });
         </script>
         </body>
@@ -367,45 +471,63 @@ enum MarkdownToHTML {
         //    Pattern: <tag …> … </tag> (case-insensitive, dot matches
         //    newlines via `.dotMatchesLineSeparators`).
         let dangerousTags = ["script", "style", "iframe", "object", "embed"]
-        for tag in dangerousTags {
-            let pattern = "<\(tag)(\\s[^>]*)?>.*?</\(tag)>"
-            if let re = try? NSRegularExpression(
-                pattern: pattern,
-                options: [.caseInsensitive, .dotMatchesLineSeparators]
-            ) {
-                let range = NSRange(s.startIndex..., in: s)
-                s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+        // Repeat until nothing changes: removing an inner tag can splice
+        // a new one together (`<scr<script>…</script>ipt>`).
+        for _ in 0..<8 {
+            let before = s
+            for tag in dangerousTags {
+                let pattern = "<\(tag)(\\s[^>]*)?>.*?</\(tag)>"
+                if let re = try? NSRegularExpression(
+                    pattern: pattern,
+                    options: [.caseInsensitive, .dotMatchesLineSeparators]
+                ) {
+                    let range = NSRange(s.startIndex..., in: s)
+                    s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+                }
+                // Also remove self-closing / void forms: <embed …> <object …>
+                let voidPattern = "<\(tag)(\\s[^>]*)?(/)?>?"
+                if let re = try? NSRegularExpression(
+                    pattern: voidPattern,
+                    options: [.caseInsensitive]
+                ) {
+                    let range = NSRange(s.startIndex..., in: s)
+                    s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+                }
             }
-            // Also remove self-closing / void forms: <embed …> <object …>
-            let voidPattern = "<\(tag)(\\s[^>]*)?(/)?>?"
+
+            // 2. Strip on* event-handler attributes from surviving tags.
+            //    Matches both single- and double-quoted values, and unquoted.
+            //    `/` and quotes separate attributes too (`<svg/onload=…>`).
             if let re = try? NSRegularExpression(
-                pattern: voidPattern,
+                pattern: #"[\s/"']+on[a-zA-Z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#,
                 options: [.caseInsensitive]
             ) {
                 let range = NSRange(s.startIndex..., in: s)
-                s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+                s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: " ")
             }
+            if s == before { break }
         }
 
-        // 2. Strip on* event-handler attributes from surviving tags.
-        //    Matches both single- and double-quoted values, and unquoted.
-        //    Pattern: \s+on[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)
+        // 3. Neutralise script-capable URLs in href/src/action/… — after
+        //    decoding entities and dropping whitespace, so
+        //    `jav&#x61;script:` and `java\tscript:` are caught too.
         if let re = try? NSRegularExpression(
-            pattern: #"\s+on[a-zA-Z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]*)"#,
+            pattern: #"\b(href|src|action|formaction|xlink:href|data)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)"#,
             options: [.caseInsensitive]
         ) {
-            let range = NSRange(s.startIndex..., in: s)
-            s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
-        }
-
-        // 3. Strip javascript: URLs from href/src/action attributes.
-        //    Tolerates whitespace and mixed case between "javascript" and ":".
-        if let re = try? NSRegularExpression(
-            pattern: #"(href|src|action)\s*=\s*["']?\s*javascript\s*:[^"'\s>]*["']?"#,
-            options: [.caseInsensitive]
-        ) {
-            let range = NSRange(s.startIndex..., in: s)
-            s = re.stringByReplacingMatches(in: s, options: [], range: range, withTemplate: "")
+            let ns = s as NSString
+            let out = NSMutableString(string: s)
+            for m in re.matches(in: s, range: NSRange(location: 0, length: ns.length)).reversed() {
+                var value = ns.substring(with: m.range(at: 2))
+                if let first = value.first, first == "\"" || first == "'" {
+                    value = String(value.dropFirst().dropLast())
+                }
+                let attr = ns.substring(with: m.range(at: 1)).lowercased()
+                if !isSafeURL(value, allowDataImages: attr == "src") {
+                    out.replaceCharacters(in: m.range, with: "\(attr)=\"#\"")
+                }
+            }
+            s = out as String
         }
 
         return s
@@ -499,7 +621,13 @@ private struct HTMLVisitor: MarkupVisitor {
     }
 
     mutating func visitCodeBlock(_ codeBlock: CodeBlock) -> String {
-        let lang = (codeBlock.language ?? "").lowercased()
+        // The info string is author-controlled and lands in an attribute:
+        // keep the first word, only identifier-ish characters, escaped.
+        // (```` ```x"><svg onload=…> ```` used to inject markup.)
+        let firstWord = (codeBlock.language ?? "")
+            .split(whereSeparator: { $0.isWhitespace }).first.map(String.init) ?? ""
+        let lang = MarkdownToHTML.htmlEscape(String(
+            firstWord.lowercased().prefix { $0.isLetter || $0.isNumber || "_+#.-".contains($0) }))
         let code = MarkdownToHTML.htmlEscape(codeBlock.code)
         if lang == "mermaid" {
             // Strip the trailing newline so mermaid.js doesn't get
@@ -572,13 +700,15 @@ private struct HTMLVisitor: MarkupVisitor {
     }
 
     mutating func visitLink(_ link: Link) -> String {
-        let dest = link.destination ?? ""
+        let raw = link.destination ?? ""
+        let dest = MarkdownToHTML.isSafeURL(raw) ? raw : "#"
         let safe = MarkdownToHTML.htmlEscape(dest)
         return "<a href=\"\(safe)\">\(defaultVisit(link))</a>"
     }
 
     mutating func visitImage(_ image: Image) -> String {
-        let src = image.source ?? ""
+        let rawSrc = image.source ?? ""
+        let src = MarkdownToHTML.isSafeURL(rawSrc, allowDataImages: true) ? rawSrc : ""
         let safeSrc = MarkdownToHTML.htmlEscape(src)
         let alt = image.plainText
         let safeAlt = MarkdownToHTML.htmlEscape(alt)

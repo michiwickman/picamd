@@ -76,7 +76,13 @@ struct AICompletionRequest {
     /// `system` message.
     var systemPrompt: String?
     var model: String
-    var maxTokens: Int = 2048
+    /// Output ceiling. Generous on purpose: current Claude models think
+    /// by default and thinking counts against `max_tokens`, so 2048 could
+    /// truncate even a short answer. The model stops when it's done;
+    /// this is a cap, not a target. Local servers keep a smaller cap —
+    /// some reject a value larger than their context window.
+    var maxTokens: Int = 16_000
+    var localMaxTokens: Int = 2048
 }
 
 /// Builds provider-specific `URLRequest`s from an `AICompletionRequest`.
@@ -118,7 +124,7 @@ enum AIRequestBuilder {
         }
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = 120
+        urlRequest.timeoutInterval = 300
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         urlRequest.setValue(key, forHTTPHeaderField: "x-api-key")
         urlRequest.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
@@ -152,7 +158,7 @@ enum AIRequestBuilder {
         }
         var urlRequest = URLRequest(url: url)
         urlRequest.httpMethod = "POST"
-        urlRequest.timeoutInterval = 120
+        urlRequest.timeoutInterval = 300
         urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let key = apiKey, !key.isEmpty {
             urlRequest.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
@@ -166,12 +172,21 @@ enum AIRequestBuilder {
         }
         messages.append(["role": "user", "content": req.userPrompt])
 
-        let body: [String: Any] = [
+        var body: [String: Any] = [
             "model": req.model,
-            "max_tokens": req.maxTokens,
             "messages": messages,
             "stream": false,
         ]
+        // OpenAI's own API rejects `max_tokens` on its reasoning models
+        // (it wants `max_completion_tokens`); OpenAI-compatible servers
+        // (Groq, LM Studio, Ollama, …) still expect `max_tokens`.
+        if provider == .openai, url.host?.hasSuffix("api.openai.com") == true {
+            body["max_completion_tokens"] = req.maxTokens
+        } else if provider == .openai {
+            body["max_tokens"] = req.maxTokens
+        } else {
+            body["max_tokens"] = req.localMaxTokens
+        }
         urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
         return urlRequest
     }
@@ -200,6 +215,16 @@ extension AIProvider {
         if let errorObj = json["error"] as? [String: Any],
            let msg = errorObj["message"] as? String {
             throw AIError.serverError(status: -1, body: msg)
+        }
+        // Check why generation stopped before trusting the text: a
+        // truncated answer must never replace the user's selection.
+        switch json["stop_reason"] as? String {
+        case "max_tokens":
+            throw AIError.truncated
+        case "refusal":
+            throw AIError.refused
+        default:
+            break
         }
         guard let content = json["content"] as? [[String: Any]] else {
             throw AIError.invalidResponse("Anthropic: missing `content` array")

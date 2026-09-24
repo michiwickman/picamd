@@ -47,18 +47,30 @@ struct CodeBlockHighlighter {
             )
             let bodyEnd = closingLineRange.location
             guard bodyEnd > bodyStart else { continue }
-            let bodyRange = NSRange(location: bodyStart, length: bodyEnd - bodyStart)
+            var bodyRange = NSRange(location: bodyStart, length: bodyEnd - bodyStart)
+            // Only tokenize the part of a long block that's in the working
+            // slice (line-aligned), not all 5,000 lines on every keystroke.
+            if let vp = viewportRange {
+                bodyRange = NSIntersectionRange(bodyRange, nsString.lineRange(for: vp))
+                guard bodyRange.length > 0 else { continue }
+            }
             let body = nsString.substring(with: bodyRange)
 
-            // Apply each token type's regex.
+            // Apply each token type's regex. Comments and strings claim
+            // their span: later rules (keywords, types, numbers) must not
+            // repaint inside them — `// return if true` stays comment-grey.
+            var claimed: [NSRange] = []
             for rule in tokenizer.rules {
+                let claims = rule.token == .comment || rule.token == .string
                 rule.regex.enumerateMatches(in: body, options: [], range: NSRange(location: 0, length: (body as NSString).length)) { match, _, _ in
-                    guard let m = match else { return }
+                    guard let m = match, m.range.length > 0 else { return }
+                    if claimed.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) { return }
                     let absoluteRange = NSRange(location: bodyRange.location + m.range.location,
                                                 length: m.range.length)
                     if let color = palette.color(for: rule.token) {
                         textStorage.addAttribute(.foregroundColor, value: color, range: absoluteRange)
                     }
+                    if claims { claimed.append(m.range) }
                 }
             }
         }
@@ -133,8 +145,19 @@ struct CodeBlockHighlighter {
         // Strip leading backticks/tildes
         var s = fenceLine
         while let first = s.first, first == "`" || first == "~" { s.removeFirst() }
-        return s.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)?.lowercased() ?? ""
+        let lang = s.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)?.lowercased() ?? ""
+        return languageAliases[lang] ?? lang
     }
+
+    /// Common short names for the languages above.
+    private static let languageAliases: [String: String] = [
+        "js": "javascript", "jsx": "javascript", "mjs": "javascript", "node": "javascript",
+        "ts": "typescript", "tsx": "typescript",
+        "py": "python", "python3": "python",
+        "sh": "bash", "zsh": "bash", "shell": "bash", "console": "bash",
+        "yml": "yaml", "rs": "rust", "golang": "go",
+        "htm": "html", "xml": "html", "jsonc": "json",
+    ]
 
     private static func compile(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression {
         try! NSRegularExpression(pattern: pattern, options: options)

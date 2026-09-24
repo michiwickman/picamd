@@ -81,7 +81,7 @@ struct MarkdownTextView: NSViewRepresentable {
         context.coordinator.attachSearch(search)
         context.coordinator.isDark = textView.effectiveAppearance.isDark
         context.coordinator.highlighter.theme = theme
-        applyTheme(theme, to: scrollView, textView: textView)
+        applyTheme(theme, to: scrollView, textView: textView, restyleText: true)
 
         // Wire up the block overlay manager
         let blockManager = BlockOverlayManager()
@@ -137,6 +137,8 @@ struct MarkdownTextView: NSViewRepresentable {
 
         if textView.string != text {
             let selection = textView.selectedRange()
+            // A running theme sweep holds ranges into the old text.
+            context.coordinator.cancelProgressiveHighlight()
             textView.string = text
             context.coordinator.seedTextMirror(text)
             let total = (text as NSString).length
@@ -151,18 +153,17 @@ struct MarkdownTextView: NSViewRepresentable {
             context.coordinator.scheduleSearchRefresh()
         }
 
-        let isDark = scrollView.effectiveAppearance.isDark
-        if context.coordinator.isDark != isDark {
-            context.coordinator.isDark = isDark
-            context.coordinator.applyHighlightingNow()
-        }
+        // The editor's colours come from the user's palette, not from the
+        // system Light/Dark setting, so an appearance flip needs no
+        // re-highlight (it used to trigger one for no visual change).
+        context.coordinator.isDark = scrollView.effectiveAppearance.isDark
 
         // Live theme update. Markup structure is unchanged — only colours
         // and fonts — so repaint progressively (viewport first, rest in
         // background chunks) instead of one blocking full-document pass.
         if context.coordinator.highlighter.theme != theme {
             context.coordinator.highlighter.theme = theme
-            applyTheme(theme, to: scrollView, textView: textView)
+            applyTheme(theme, to: scrollView, textView: textView, restyleText: false)
             context.coordinator.applyThemeChangeProgressively()
         }
 
@@ -208,13 +209,26 @@ struct MarkdownTextView: NSViewRepresentable {
     /// Apply background colours, insertion-point colour, and base font
     /// derived from the theme. Called once on creation and on every
     /// theme change.
-    private func applyTheme(_ theme: EditorTheme, to scrollView: NSScrollView, textView: NSTextView) {
+    ///
+    /// `restyleText` sets font + colour on the whole storage — right for
+    /// the initial load, wrong for a live theme change: `NSTextView.font`
+    /// / `.textColor` overwrite every attribute, un-concealing all the
+    /// Markdown outside the viewport until the highlighter reaches it.
+    /// On updates only the typing attributes change; the progressive
+    /// re-highlight restyles the text itself.
+    private func applyTheme(_ theme: EditorTheme, to scrollView: NSScrollView,
+                            textView: NSTextView, restyleText: Bool) {
         let bg = theme.palette.bg
+        let font = theme.bodyFont.font(size: theme.fontBaseSize)
         scrollView.backgroundColor = bg
         textView.backgroundColor = bg
         textView.insertionPointColor = theme.palette.fg
-        textView.textColor = theme.palette.fg
-        textView.font = theme.bodyFont.font(size: theme.fontBaseSize)
+        if restyleText {
+            textView.textColor = theme.palette.fg
+            textView.font = font
+        }
+        textView.typingAttributes[.font] = font
+        textView.typingAttributes[.foregroundColor] = theme.palette.fg
     }
 
     private func applyJump(to range: NSRange, in textView: NSTextView) {
@@ -222,8 +236,23 @@ struct MarkdownTextView: NSViewRepresentable {
         guard total > 0 else { return }
         let safeLoc = max(0, min(range.location, total))
         let safeRange = NSRange(location: safeLoc, length: 0)
-        textView.scrollRangeToVisible(safeRange)
         textView.setSelectedRange(safeRange)
+        // Put the heading near the top of the viewport, like a jump in
+        // any outline — `scrollRangeToVisible` alone parked it on the
+        // bottom edge when jumping forward.
+        if let layoutManager = textView.layoutManager,
+           let container = textView.textContainer,
+           let clip = textView.enclosingScrollView?.contentView {
+            let probe = NSRange(location: min(safeLoc, total - 1), length: 1)
+            let glyphs = layoutManager.glyphRange(forCharacterRange: probe, actualCharacterRange: nil)
+            let rect = layoutManager.boundingRect(forGlyphRange: glyphs, in: container)
+            let maxY = max(0, textView.frame.height - clip.bounds.height)
+            let y = min(maxY, max(0, rect.minY + textView.textContainerInset.height - 24))
+            clip.scroll(to: NSPoint(x: 0, y: y))
+            textView.enclosingScrollView?.reflectScrolledClipView(clip)
+        } else {
+            textView.scrollRangeToVisible(safeRange)
+        }
         textView.window?.makeFirstResponder(textView)
     }
 
@@ -346,6 +375,8 @@ struct MarkdownTextView: NSViewRepresentable {
 
         private func applyExternalReload(text: String) {
             guard let textView = textView else { return }
+            // A running theme sweep holds ranges into the old text.
+            progressiveHighlightTask?.cancel()
             // Replace storage atomically; the SwiftUI binding update will
             // also fire via textDidChange.
             let selection = textView.selectedRange()
@@ -405,11 +436,18 @@ struct MarkdownTextView: NSViewRepresentable {
             // live-rendered (real WKWebView) vs placeholder. Debounce so
             // we only do it once after the user stops moving — otherwise
             // fast-scroll thrashes WKWebView spawn/teardown.
+            //
+            // The same pass re-highlights what just scrolled into view.
+            // Highlighting is viewport-scoped, and nothing used to restyle
+            // text on scroll — so anything that went stale off-screen
+            // (a theme change whose background sweep was interrupted,
+            // Focus Mode, a reload) stayed raw Markdown until the caret
+            // got there.
             liveSetRefreshTask?.cancel()
             liveSetRefreshTask = Task { @MainActor [weak self] in
                 try? await Task.sleep(for: .milliseconds(EditorTiming.lazyLiveSetDebounceMs))
                 if Task.isCancelled { return }
-                self?.blockManager?.refreshLiveSet()
+                self?.applyHighlightingNow()
             }
         }
 
@@ -491,12 +529,9 @@ struct MarkdownTextView: NSViewRepresentable {
                 Task { @MainActor in
                     guard let self = self else { return }
                     let nowDark = view.effectiveAppearance.isDark
-                    if self.isDark != nowDark {
-                        self.isDark = nowDark
-                        // System dark-mode flip: same as a theme change —
-                        // progressive repaint, no full-doc freeze.
-                        self.applyThemeChangeProgressively()
-                    }
+                    // Tracked for completeness only: the palette, not the
+                    // system appearance, decides every editor colour.
+                    self.isDark = nowDark
                 }
             }
         }
@@ -547,10 +582,15 @@ struct MarkdownTextView: NSViewRepresentable {
                   let layoutManager = textView.layoutManager,
                   let textContainer = textView.textContainer else { return }
             let cursor = textView.selectedRange()
-            // Cursor index can land on a zero-width glyph at end of line —
-            // probe a 1-char range so we get a visible bounding rect.
-            let probeRange = NSRange(location: cursor.location,
-                                      length: cursor.length > 0 ? cursor.length : 1)
+            // Only a caret is centred. Centring a whole selection made ⌘A
+            // jump to the middle of the document and a drag-selection
+            // bounce on every mouse move.
+            guard cursor.length == 0 else { return }
+            let total = textView.textStorage?.length ?? 0
+            guard total > 0 else { return }
+            // Probe one real character (clamped at the end of the
+            // document) so the bounding rect is the caret's line.
+            let probeRange = NSRange(location: min(cursor.location, total - 1), length: 1)
             let glyphRange = layoutManager.glyphRange(forCharacterRange: probeRange,
                                                        actualCharacterRange: nil)
             let bounding = layoutManager.boundingRect(forGlyphRange: glyphRange,
@@ -568,8 +608,14 @@ struct MarkdownTextView: NSViewRepresentable {
         /// Background sweep that repaints the off-screen part of the doc
         /// with a new theme/appearance, chunk by chunk, after the visible
         /// viewport has already been repainted. Cancelled by any edit or
-        /// cursor move (via `scheduleHighlight`).
+        /// cursor move (via `scheduleHighlight`); whatever it didn't reach
+        /// is restyled when scrolled into view.
         private var progressiveHighlightTask: Task<Void, Never>?
+
+        func cancelProgressiveHighlight() {
+            progressiveHighlightTask?.cancel()
+            progressiveHighlightTask = nil
+        }
 
         func scheduleHighlight(delay: Int = 50) {
             // Any user activity supersedes an in-flight theme sweep: the
@@ -684,6 +730,7 @@ struct MarkdownTextView: NSViewRepresentable {
             }
 
             let source = textView.string
+            let textChanged = scanCacheSource != source
             // Block extraction, task-list matches and protected ranges are
             // all full-document scans derived purely from the text. They
             // can't change unless the text changes, so memoise them by
@@ -725,8 +772,9 @@ struct MarkdownTextView: NSViewRepresentable {
                                     protectedRanges: protectedRanges)
 
             // Refresh footnote-tooltip index so hover-popovers stay in
-            // sync with the source. Cheap (regex pass over the doc).
-            if let qmdView = textView as? PicaMDTextView {
+            // sync with the source — only when the text changed, not on
+            // every caret move / scroll.
+            if textChanged, let qmdView = textView as? PicaMDTextView {
                 qmdView.footnoteTooltip.updateIndex(from: source)
             }
         }

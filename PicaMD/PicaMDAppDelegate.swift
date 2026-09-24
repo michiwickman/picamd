@@ -23,6 +23,9 @@ final class PicaMDAppDelegate: NSObject, NSApplicationDelegate {
         // Never show the welcome window under XCTest: it would hijack the
         // launch path and (if it ran anything modal) hang the test runner.
         guard !Self.isRunningTests else { return }
+        // Drop whatever a crashed or killed previous session left in the
+        // MCP registry; documents re-register as their windows open.
+        ActiveDocumentsRegistry.shared.reset(synchronously: false)
         // Let the DocumentGroup launch path settle (auto-untitled creation,
         // state restoration, and any file passed via Finder/`open` args all
         // resolve within a couple hundred ms).
@@ -74,6 +77,12 @@ final class PicaMDAppDelegate: NSObject, NSApplicationDelegate {
             showWelcomeWindow()
         }
         return true
+    }
+
+    /// Nothing is open once we're gone — tell the MCP sidecar.
+    func applicationWillTerminate(_ notification: Notification) {
+        guard !Self.isRunningTests else { return }
+        ActiveDocumentsRegistry.shared.reset(synchronously: true)
     }
 
     /// Stay alive with no windows (the welcome window is transient and the

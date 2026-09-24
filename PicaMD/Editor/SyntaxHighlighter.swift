@@ -467,8 +467,15 @@ final class SyntaxHighlighter {
         }
 
         // Math block — conceal `$$` fences when cursor is outside, render inner as math.
-        for r in mathBlockRanges {
-            let active = cursor.touchesBlock(r)
+        for block in mathBlockRanges {
+            // Only restyle the part inside this pass's working slice. The
+            // overlay concealment re-applies within the slice only, so
+            // painting whole blocks here un-concealed every math block
+            // outside it on each keystroke (and in the theme sweep, each
+            // chunk undid the previous chunks' blocks).
+            let r = NSIntersectionRange(block, workingRange)
+            guard r.length > 0 else { continue }
+            let active = cursor.touchesBlock(block)
             textStorage.setAttributes([
                 .font: NSFont.systemFont(ofSize: theme.fontBaseSize + 1),
                 .foregroundColor: palette.math,
@@ -481,10 +488,12 @@ final class SyntaxHighlighter {
             textStorage.addAttribute(.paragraphStyle, value: centerPara, range: r)
             if !active {
                 let nsSource = source as NSString
-                let openLine = nsSource.lineRange(for: NSRange(location: r.location, length: 0))
-                let closeLineStart = r.location + r.length
+                let openLine = nsSource.lineRange(for: NSRange(location: block.location, length: 0))
+                let closeLineStart = block.location + block.length
                 let closeLine = nsSource.lineRange(for: NSRange(location: max(0, closeLineStart - 1), length: 0))
-                for fence in [openLine, closeLine] where fence.length > 0 {
+                for fenceLine in [openLine, closeLine] {
+                    let fence = NSIntersectionRange(fenceLine, workingRange)
+                    guard fence.length > 0 else { continue }
                     textStorage.addAttribute(.foregroundColor, value: NSColor.clear, range: fence)
                     textStorage.addAttribute(.font, value: tinyFont(), range: fence)
                 }

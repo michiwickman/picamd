@@ -23,6 +23,22 @@ struct FootnoteIndex: Equatable {
 
     static let empty = FootnoteIndex(refs: [], definitions: [:])
 
+    // Compiled once — `build` runs on every edit.
+    private static let defRegex = try! NSRegularExpression(pattern: #"^\[\^([^\]]+)\]:[ \t]*"#,
+                                                           options: [.anchorsMatchLines])
+    private static let refRegex = try! NSRegularExpression(pattern: #"\[\^([^\]]+)\]"#)
+    private static let fencedCodeRegex = try! NSRegularExpression(
+        pattern: #"(?m)^([`~]{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$"#)
+    private static let inlineCodeRegex = try! NSRegularExpression(pattern: #"(`+)([^`\n]+?)\1"#)
+
+    /// Fenced blocks and inline code spans. `[^a-z]` in a regex inside a
+    /// code block is code, not a footnote reference.
+    static func codeRanges(in source: String) -> [NSRange] {
+        let full = NSRange(location: 0, length: (source as NSString).length)
+        return (fencedCodeRegex.matches(in: source, range: full)
+                + inlineCodeRegex.matches(in: source, range: full)).map(\.range)
+    }
+
     /// Build the index from raw markdown.
     ///
     /// Ref grammar: `[^<id>]` where `<id>` matches `[^\]]+`.
@@ -32,16 +48,19 @@ struct FootnoteIndex: Equatable {
     static func build(from source: String) -> FootnoteIndex {
         let nsSource = source as NSString
         let fullRange = NSRange(location: 0, length: nsSource.length)
+        let code = codeRanges(in: source)
+        func inCode(_ location: Int) -> Bool {
+            code.contains { NSLocationInRange(location, $0) }
+        }
 
         // Definitions first — collect their start positions so we can
         // exclude them from the refs list (the same `[^id]` regex
         // would otherwise match the bracket portion of every def).
         struct DefStart { let id: String; let lineStart: Int; let bodyStart: Int }
         var defStarts: [DefStart] = []
-        if let defRegex = try? NSRegularExpression(pattern: #"^\[\^([^\]]+)\]:[ \t]*"#,
-                                                    options: [.anchorsMatchLines]) {
+        do {
             defRegex.enumerateMatches(in: source, options: [], range: fullRange) { match, _, _ in
-                guard let m = match, m.numberOfRanges >= 2 else { return }
+                guard let m = match, m.numberOfRanges >= 2, !inCode(m.range.location) else { return }
                 let idRange = m.range(at: 1)
                 guard idRange.location != NSNotFound else { return }
                 let id = nsSource.substring(with: idRange)
@@ -58,9 +77,9 @@ struct FootnoteIndex: Equatable {
         // start (those are the bracket portion of the def itself, not
         // a reference to it).
         var refs: [FootnoteRef] = []
-        if let refRegex = try? NSRegularExpression(pattern: #"\[\^([^\]]+)\]"#) {
+        do {
             refRegex.enumerateMatches(in: source, options: [], range: fullRange) { match, _, _ in
-                guard let m = match, m.numberOfRanges >= 2 else { return }
+                guard let m = match, m.numberOfRanges >= 2, !inCode(m.range.location) else { return }
                 if defLineStarts.contains(m.range.location) { return }
                 let idRange = m.range(at: 1)
                 guard idRange.location != NSNotFound else { return }
@@ -83,7 +102,7 @@ struct FootnoteIndex: Equatable {
             let bodySlice = nsSource.substring(with: bodyRange)
             // Cut at first blank line
             let trimmed: String
-            if let blankRange = bodySlice.range(of: "\n\n") {
+            if let blankRange = bodySlice.range(of: #"\r?\n[ \t]*\r?\n"#, options: .regularExpression) {
                 trimmed = String(bodySlice[..<blankRange.lowerBound])
             } else {
                 trimmed = bodySlice

@@ -10,7 +10,12 @@ import Foundation
 /// `SyntaxHighlighter.mathBlockRegex` were two compiled instances of
 /// the same pattern that could (and did) get edited independently.
 enum MarkdownRegexes {
-    static let mathBlock = compile(#"(?m)^\$\$[\s\S]*?^\$\$\s*$"#)
+    /// `$$…$$` display math: either on one line (`$$E=mc^2$$`) or with
+    /// the fences on their own lines. The old pattern had no one-line
+    /// form, so `$$x$$` ran on to the NEXT `$$` line and swallowed the
+    /// prose in between; its trailing `\s*` also ate the blank lines
+    /// after a block (concealed, so the gap disappeared).
+    static let mathBlock = compile(#"(?m)^\$\$(?:(?=[^\n]*\$\$[ \t]*$)[^\n]*|[^\n]*\n[\s\S]*?^\$\$)[ \t]*$"#)
     static let mermaidFence = compile(#"(?m)^```mermaid[ \t]*\n[\s\S]*?^```[ \t]*$"#)
     static let fencedCode = compile(#"(?m)^([`~]{3,})[^\n]*\n[\s\S]*?^\1[ \t]*$"#)
     /// Block-level image: a line that is *only* an `![alt](url)` (with

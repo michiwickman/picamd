@@ -17,9 +17,8 @@ can contribute:
    set, the prompt templates, the MCP tool surface, all welcome.
 
 Less useful (we're not looking for it yet):
-- New features. The Phase 1-12 roadmap (see `PHASES.md`) is the
-  scope for v1.0; new feature PRs will likely sit. Open an issue
-  to discuss first.
+- New features. PicaMD is meant to stay a small editor and viewer;
+  feature PRs will likely sit. Open an issue to discuss first.
 - Refactors that don't fix a bug or simplify code
 - Style-only PRs (we follow Swift's standard formatting)
 
@@ -33,9 +32,8 @@ cd picamd
 xcodegen generate    # if just opening in Xcode
 ```
 
-To run the unit suite (184 tests at the time of writing — 162 in
-the main bundle + 22 in the MCP-sidecar bundle), invoke each
-bundle separately. `xcodebuild test` against the scheme will
+To run the unit suite (the main bundle plus the MCP-sidecar
+bundle), invoke each bundle separately. `xcodebuild test` against the scheme will
 eventually run both, but it serialises them with a long delay
 between (~30 min in observed runs); two separate invocations
 finish in seconds:

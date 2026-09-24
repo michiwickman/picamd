@@ -256,7 +256,7 @@ enum DocumentTools {
     static func replaceLines() -> ToolRegistry.Tool {
         return ToolRegistry.Tool(
             name: "document.replaceLines",
-            description: "Replace a 1-indexed inclusive line range with new text. Atomic: reads the current file, splices in the new content, writes the whole file back. PicaMD's file-watcher picks the change up and re-renders the open editor.",
+            description: "Replace a 1-indexed inclusive line range with new text. Atomic: reads the current file, splices in the new content, writes the whole file back. PicaMD notices the change and offers to reload the open editor. Works on the saved file — unsaved edits in PicaMD are not visible here.",
             inputSchema: [
                 "type": "object",
                 "required": ["path", "start", "end", "text"],
@@ -264,7 +264,7 @@ enum DocumentTools {
                     "path":  ["type": "string"],
                     "start": ["type": "integer", "minimum": 1],
                     "end":   ["type": "integer", "minimum": 1],
-                    "text":  ["type": "string", "description": "Replacement content. Trailing newline is added automatically if missing."],
+                    "text":  ["type": "string", "description": "Replacement content for the whole range. A single trailing newline is optional and ignored."],
                 ],
             ],
             annotations: ["destructiveHint": true, "idempotentHint": false],
@@ -290,7 +290,12 @@ enum DocumentTools {
                 let lo = start - 1          // 0-indexed; never clamped
                 let hi = min(end, lines.count)
 
-                let replacementLines = newText.components(separatedBy: "\n")
+                // The replaced lines' own terminators are kept by the
+                // join below, so one trailing newline in `text` is the
+                // line terminator, not an extra empty line (which would
+                // end a table or loosen a list).
+                let body = newText.hasSuffix("\n") ? String(newText.dropLast()) : newText
+                let replacementLines = body.components(separatedBy: "\n")
                 lines.replaceSubrange(lo..<hi, with: replacementLines)
                 let merged = lines.joined(separator: "\n")
                 try writeAtomic(merged, to: path)

@@ -54,8 +54,15 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         // re-query NSApp.mainWindow on the main actor instead.
         Task { @MainActor [weak self] in
             guard let self = self, let welcome = self.window else { return }
+            // Only a *document* window replaces the hub. Settings (⌘,)
+            // becoming main used to hide it too, leaving no window at all
+            // once Settings was closed.
             if let main = NSApp.mainWindow, main !== welcome {
-                welcome.orderOut(nil)
+                let isDocument = NSDocumentController.shared.document(for: main) != nil
+                let isSettings = main.identifier?.rawValue.contains("Settings") == true
+                if isDocument || !isSettings {
+                    welcome.orderOut(nil)
+                }
             }
         }
     }

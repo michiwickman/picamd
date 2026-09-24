@@ -39,12 +39,23 @@ final class ActiveDocumentsRegistry {
                                             isDirectory: false)
     }
 
-    private init() {
-        // Load any leftover registry from a previous launch — the
-        // OS clears it eventually if PicaMD crashed without
-        // unregistering, but on a clean restart the SwiftUI
-        // DocumentGroup will re-register every restored document, so
-        // stale entries get overwritten on first window-open anyway.
+    private init() {}
+
+    /// Empty the registry file. Called at launch (a crash or force-quit
+    /// leaves the previous session's list behind — the sidecar would keep
+    /// reporting those documents as open and allow edits to them) and at
+    /// quit, where it writes synchronously: ⌘Q doesn't close windows
+    /// first, and an async write may never run.
+    func reset(synchronously: Bool) {
+        entries.removeAll()
+        if synchronously {
+            // Through the same serial queue, so an async write still
+            // pending can't land afterwards with the old list.
+            let url = Self.registryFileURL
+            queue.sync { Self.write([], to: url) }
+        } else {
+            persist()
+        }
     }
 
     // MARK: - API
@@ -81,21 +92,25 @@ final class ActiveDocumentsRegistry {
         let url = Self.registryFileURL
         // Hop off main: file IO can take ms, especially on iCloud Drive.
         queue.async {
-            let dir = url.deletingLastPathComponent()
-            try? FileManager.default.createDirectory(
-                at: dir, withIntermediateDirectories: true
-            )
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-            encoder.dateEncodingStrategy = .iso8601
-            do {
-                let data = try encoder.encode(snapshot)
-                // Atomic write so a sidecar reading concurrently
-                // never sees a half-written file.
-                try data.write(to: url, options: .atomic)
-            } catch {
-                NSLog("PicaMD: failed to persist active-documents.json: \(error)")
-            }
+            Self.write(snapshot, to: url)
+        }
+    }
+
+    private nonisolated static func write(_ snapshot: [Entry], to url: URL) {
+        let dir = url.deletingLastPathComponent()
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        do {
+            let data = try encoder.encode(snapshot)
+            // Atomic write so a sidecar reading concurrently
+            // never sees a half-written file.
+            try data.write(to: url, options: .atomic)
+        } catch {
+            NSLog("PicaMD: failed to persist active-documents.json: \(error)")
         }
     }
 }
