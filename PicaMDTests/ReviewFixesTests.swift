@@ -278,8 +278,9 @@ final class HTMLExportReviewFixesTests: XCTestCase {
     func testCodeFenceLanguageCannotInjectMarkup() {
         let out = MarkdownToHTML.render("```x\"><svg/onload=alert(1)>\ncode\n```")
         XCTAssertFalse(out.contains("<svg"))
-        XCTAssertFalse(out.contains("onload"))
-        XCTAssertTrue(out.contains("class=\"language-x\""))
+        // (The page itself has onload="renderMathInElement…" for KaTeX.)
+        XCTAssertFalse(out.contains("onload=alert"))
+        XCTAssertTrue(out.contains("<pre><code class=\"language-x\">"))
     }
 
     func testHighlightAndFootnoteSyntaxInsideCodeIsLeftAlone() {
