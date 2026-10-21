@@ -467,7 +467,7 @@ final class PicaMDTextView: NSTextView {
     }
 
     /// "What should the AI do?" — for presets that carry no instruction of
-    /// their own (like the starter "Custom prompt"). `nil` on Cancel.
+    /// their own (like the starter "Custom Prompt"). `nil` on Cancel.
     private func askForInstruction(presetName: String) -> String? {
         let alert = NSAlert()
         alert.messageText = presetName

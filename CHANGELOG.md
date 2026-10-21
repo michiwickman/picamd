@@ -6,6 +6,8 @@ is [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-21
+
 The first release since 0.8.0-alpha. It also contains every change listed
 under
 [0.9.0](https://github.com/michiwickman/picamd/blob/main/CHANGELOG.md#090--never-released),
@@ -113,6 +115,9 @@ which was never released on its own. Requires macOS 27 on Apple silicon.
 
 - **Requires macOS 27 or later** (0.8.0-alpha ran on macOS 14). Macs on
   macOS 14 to 26 stay on 0.8.0-alpha; the update is not offered to them.
+- **The starter AI presets have English names** (Clean Up Markdown,
+  Summarize, Rewrite Naturally …) on new installs and after Reset.
+  Presets you already have keep their names.
 - **New app icon:** three lines of paper, the middle one raw Markdown
   with a blue `#` and the caret.
 - Quick Look previews Markdown files only; plain text files keep the
@@ -301,7 +306,7 @@ which was never released on its own. Requires macOS 27 on Apple silicon.
   by other apps (git, other editors, the MCP sidecar) offer a reload.
 - AI: responses land on the text they were made from even if you kept
   typing, one request at a time (Esc cancels), cut-off or refused
-  answers never replace text, "Custom prompt" asks what to do, the
+  answers never replace text, "Custom Prompt" asks what to do, the
   popover mode shows its text, OpenAI reasoning models work.
 - Export: PDF/DOCX/EPUB include relative images and find MacTeX when
   launched from Finder; HTML export keeps math intact and can't be
@@ -573,5 +578,6 @@ First public release.
 - Streaming AI responses (incremental insertion) is planned
   but not in 0.8.0.
 
-[Unreleased]: https://github.com/michiwickman/picamd/compare/v0.8.0-alpha...HEAD
+[Unreleased]: https://github.com/michiwickman/picamd/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/michiwickman/picamd/compare/v0.8.0-alpha...v0.10.0
 [0.8.0-alpha]: https://github.com/michiwickman/picamd/releases/tag/v0.8.0-alpha

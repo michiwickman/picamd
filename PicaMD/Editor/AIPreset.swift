@@ -131,14 +131,15 @@ extension AIPreset {
     /// 9 built-in presets the user can immediately try after enabling
     /// AI. Their hotkeys are pre-bound to ⌃⌘1…⌃⌘9.
     ///
-    /// They're written to keep answers short for snappy UX, and so
-    /// each is genuinely useful for the *same*
-    /// kind of writing tasks the user said they care about: drafts,
-    /// project notes, README-style docs.
+    /// They're written to keep answers short for snappy UX, and each
+    /// fits everyday writing: drafts, project notes, README-style docs.
+    /// The names are English; the prompts keep the language of the
+    /// selected text. Stored presets keep the names they were saved
+    /// with, so this list only reaches new installs and Reset.
     static let defaults: [AIPreset] = [
         AIPreset(
             id: UUID(),
-            name: "Bereinige Markdown",
+            name: "Clean Up Markdown",
             systemPrompt: "You're a careful Markdown editor. Clean up the user's text into well-formed Markdown without changing meaning. Replace fancy quotes with straight quotes, em-dashes (—) with comma or parentheses where appropriate, normalise whitespace, fix obvious typos. Output ONLY the cleaned Markdown, no preamble.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .replaceSelection,
@@ -146,7 +147,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Fasse zusammen",
+            name: "Summarize",
             systemPrompt: "You're a concise summarizer. Produce a crisp 3–5 bullet summary of the user's text. Keep the user's language (German stays German). Output ONLY the bullet list, no preamble.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .asBlockquote,
@@ -154,7 +155,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Schreibe natürlicher",
+            name: "Rewrite Naturally",
             systemPrompt: "Rewrite the user's text in natural, flowing prose. Keep the same language. Same tone, same level of formality. Don't add new information. Output ONLY the rewritten text.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .replaceSelection,
@@ -162,7 +163,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Erweitere diesen Absatz",
+            name: "Continue Paragraph",
             systemPrompt: "Continue the user's paragraph naturally — same tone, same direction. Add 2–4 sentences of substance. Same language. Don't repeat what's already said. Output ONLY the new continuation, starting from where the user left off.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .appendBelow,
@@ -170,7 +171,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Fix Grammatik & Rechtschreibung",
+            name: "Fix Grammar & Spelling",
             systemPrompt: "Fix grammar, punctuation, and spelling in the user's text. Don't change meaning, voice, or vocabulary unless required for correctness. Same language. Output ONLY the corrected text.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .replaceSelection,
@@ -178,7 +179,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Übersetze (DE ↔ EN)",
+            name: "Translate (German ↔ English)",
             systemPrompt: "Translate the user's text. If it's German, translate to English. If it's English, translate to German. If it's a mix, default to whichever is dominant. Preserve Markdown formatting. Output ONLY the translation.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .appendBelow,
@@ -186,7 +187,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Mache formeller",
+            name: "Make More Formal",
             systemPrompt: "Rewrite the user's text in a more formal register — appropriate for a business letter or technical documentation. Same language. Same factual content. Output ONLY the rewritten text.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .replaceSelection,
@@ -194,7 +195,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Mache lockerer",
+            name: "Make More Casual",
             systemPrompt: "Rewrite the user's text in a more casual, conversational register. Same language. Same factual content. Output ONLY the rewritten text.",
             userPromptTemplate: "{{selection}}",
             insertionMode: .replaceSelection,
@@ -202,7 +203,7 @@ extension AIPreset {
         ),
         AIPreset(
             id: UUID(),
-            name: "Custom prompt",
+            name: "Custom Prompt",
             systemPrompt: nil,
             userPromptTemplate: "{{prompt}}\n\n{{selection}}",
             insertionMode: .appendBelow,
