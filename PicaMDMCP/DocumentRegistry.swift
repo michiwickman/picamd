@@ -55,7 +55,8 @@ enum DocumentRegistry {
     /// `openDocuments` tool implementations. Returns `nil` if the file
     /// is unreadable; the caller decides what fallback to use.
     static func stats(at path: String) -> DocStats {
-        guard let source = try? String(contentsOfFile: path, encoding: .utf8) else {
+        guard let data = FileManager.default.contents(atPath: path),
+              let source = TextFileEncoding.decode(data)?.text else {
             // File deleted out from under us — synthesize a minimal
             // entry so `openDocuments` doesn't suddenly become an
             // error response.

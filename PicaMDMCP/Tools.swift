@@ -66,8 +66,7 @@ enum WorkspaceTools {
                 var results: [[String: Any]] = []
                 let lowered = query.lowercased()
                 outer: for entry in DocumentRegistry.activeDocuments() {
-                    guard let source = try? String(contentsOfFile: entry.path,
-                                                    encoding: .utf8) else { continue }
+                    guard let source = try? requireRead(entry.path) else { continue }
                     let lines = source.components(separatedBy: "\n")
                     for (idx, line) in lines.enumerated() {
                         if line.lowercased().contains(lowered) {
@@ -256,7 +255,7 @@ enum DocumentTools {
     static func replaceLines() -> ToolRegistry.Tool {
         return ToolRegistry.Tool(
             name: "document.replaceLines",
-            description: "Replace a 1-indexed inclusive line range with new text. Atomic: reads the current file, splices in the new content, writes the whole file back. PicaMD's file-watcher picks the change up and re-renders the open editor.",
+            description: "Replace a 1-indexed inclusive line range with new text. Atomic: reads the current file, splices in the new content, writes the whole file back. PicaMD notices the change and offers to reload the open editor. Works on the saved file — unsaved edits in PicaMD are not visible here.",
             inputSchema: [
                 "type": "object",
                 "required": ["path", "start", "end", "text"],
@@ -264,7 +263,7 @@ enum DocumentTools {
                     "path":  ["type": "string"],
                     "start": ["type": "integer", "minimum": 1],
                     "end":   ["type": "integer", "minimum": 1],
-                    "text":  ["type": "string", "description": "Replacement content. Trailing newline is added automatically if missing."],
+                    "text":  ["type": "string", "description": "Replacement content for the whole range. A single trailing newline is optional and ignored."],
                 ],
             ],
             annotations: ["destructiveHint": true, "idempotentHint": false],
@@ -275,8 +274,8 @@ enum DocumentTools {
                 guard let newText = args["text"] as? String else { throw MCPError("replaceLines: `text` required") }
                 guard start >= 1, end >= start else { throw MCPError("replaceLines: invalid range") }
 
-                let source = try requireRead(path)
-                var lines = source.components(separatedBy: "\n")
+                let file = try readFileText(path)
+                var lines = file.text.components(separatedBy: "\n")
 
                 // F10: reject start past EOF so callers don't silently insert
                 // at end when they meant to replace a line that doesn't exist.
@@ -290,10 +289,20 @@ enum DocumentTools {
                 let lo = start - 1          // 0-indexed; never clamped
                 let hi = min(end, lines.count)
 
-                let replacementLines = newText.components(separatedBy: "\n")
+                // The replaced lines' own terminators are kept by the
+                // join below, so one trailing newline in `text` is the
+                // line terminator, not an extra empty line (which would
+                // end a table or loosen a list).
+                // `text` is split on "\n" like the file: a CRLF from the
+                // client would leave a "\r" in every line, and Swift's
+                // `hasSuffix("\n")` is false for "\r\n" (one Character),
+                // so its terminator became an extra empty line.
+                let input = newText.replacingOccurrences(of: "\r\n", with: "\n")
+                let body = input.hasSuffix("\n") ? String(input.dropLast()) : input
+                let replacementLines = body.components(separatedBy: "\n")
                 lines.replaceSubrange(lo..<hi, with: replacementLines)
                 let merged = lines.joined(separator: "\n")
-                try writeAtomic(merged, to: path)
+                try writeFileText(merged, as: file, to: path)
                 return [
                     "path": path,
                     "linesBefore": hi - lo,
@@ -322,11 +331,17 @@ enum DocumentTools {
             annotations: ["destructiveHint": true, "idempotentHint": false],
             invoke: { args in
                 let path = try requirePath(from: args)
-                guard let text = args["text"] as? String else { throw MCPError("appendText: `text` required") }
-                let source = try requireRead(path)
-                let separator = source.hasSuffix("\n\n") ? "" : (source.hasSuffix("\n") ? "\n" : "\n\n")
+                guard let raw = args["text"] as? String else { throw MCPError("appendText: `text` required") }
+                let text = raw.replacingOccurrences(of: "\r\n", with: "\n")
+                let file = try readFileText(path)
+                let source = file.text
+                // Counted on scalars: `hasSuffix("\n")` is false for a file
+                // that ends in "\r\n" (one Character), which a file with
+                // mixed breaks keeps, and two blank lines were added.
+                let breaks = trailingLineBreaks(source)
+                let separator = breaks >= 2 ? "" : (breaks == 1 ? "\n" : "\n\n")
                 let updated = source + separator + text + (text.hasSuffix("\n") ? "" : "\n")
-                try writeAtomic(updated, to: path)
+                try writeFileText(updated, as: file, to: path)
                 return [
                     "path": path,
                     "appendedChars": text.count,
@@ -369,18 +384,81 @@ private func canonicalize(_ path: String) -> String {
     return (expanded as NSString).resolvingSymlinksInPath
 }
 
-private func requireRead(_ path: String) throws -> String {
+/// A document's text as the tools see it, and how the file stores it.
+///
+/// The tools read and wrote UTF-8 only: the Foundation decoder drops a
+/// UTF-8 byte order mark and the writer never puts it back, so one MCP
+/// edit removed it, and PicaMD then reloaded the file without it. A CRLF
+/// file got bare "\n" breaks spliced in. The sidecar now decodes the way
+/// the app does (`TextFileEncoding`, shared with the app) and writes the
+/// same encoding, mark and line breaks back.
+struct FileText {
+    /// The text with "\n" line breaks, whatever the file uses.
+    var text: String
+    let encoding: TextFileEncoding
+    /// Every line break in the file is CRLF; they are "\n" in `text`.
+    let crlf: Bool
+}
+
+/// Decode the file the way PicaMD opens it. Line breaks are "\n" in the
+/// result when the file uses CRLF throughout; a file with mixed breaks is
+/// left as it is.
+func readFileText(_ path: String) throws -> FileText {
+    let data: Data
     do {
-        return try String(contentsOfFile: path, encoding: .utf8)
+        data = try Data(contentsOf: URL(fileURLWithPath: path))
     } catch {
         throw MCPError("could not read \(path): \(error.localizedDescription)")
     }
+    guard let decoded = TextFileEncoding.decode(data) else {
+        throw MCPError("could not read \(path): not in a text encoding PicaMD opens")
+    }
+    let ns = decoded.text as NSString
+    let crlfCount = ns.components(separatedBy: "\r\n").count - 1
+    let lfCount = ns.components(separatedBy: "\n").count - 1
+    let crlf = crlfCount > 0 && crlfCount == lfCount
+    let text = crlf ? decoded.text.replacingOccurrences(of: "\r\n", with: "\n") : decoded.text
+    return FileText(text: text, encoding: decoded.encoding, crlf: crlf)
 }
 
-private func writeAtomic(_ text: String, to path: String) throws {
-    let url = URL(fileURLWithPath: path)
+/// Line breaks at the end of `text`, a "\r\n" counting as one.
+func trailingLineBreaks(_ text: String) -> Int {
+    var count = 0
+    var scalars = text.unicodeScalars.reversed().makeIterator()
+    var pending = scalars.next()
+    while let scalar = pending, scalar == "\n" {
+        count += 1
+        pending = scalars.next()
+        if pending == "\r" { pending = scalars.next() }
+    }
+    return count
+}
+
+private func requireRead(_ path: String) throws -> String {
+    try readFileText(path).text
+}
+
+/// Write `text` back the way `original` came: its encoding, byte order
+/// mark and line breaks. A file whose encoding can't hold the new text
+/// (a Windows 1252 file and an emoji) is refused rather than converted
+/// behind the user's back; PicaMD itself asks before switching to UTF-8.
+func writeFileText(_ text: String, as original: FileText, to path: String) throws {
+    // Only "\n" is expanded. `text` is the read result with the tool's
+    // edit spliced in, and the edit is normalised by the tool. Normalising
+    // "\r\n" again here took a CR out of every "\r\r\n" the read had
+    // left in place, on lines the edit never touched.
+    var body = text
+    if original.crlf {
+        let ns = body as NSString
+        body = ns.replacingOccurrences(of: "\n", with: "\r\n", options: .literal,
+                                       range: NSRange(location: 0, length: ns.length))
+    }
+    let (data, written) = original.encoding.encode(body)
+    guard written == original.encoding else {
+        throw MCPError("could not write \(path): the file is in \(original.encoding.displayName), which can't store some characters of this edit. Make the edit in PicaMD instead.")
+    }
     do {
-        try text.write(to: url, atomically: true, encoding: .utf8)
+        try data.write(to: URL(fileURLWithPath: path), options: .atomic)
     } catch {
         throw MCPError("could not write \(path): \(error.localizedDescription)")
     }

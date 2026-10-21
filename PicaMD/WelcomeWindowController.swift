@@ -12,7 +12,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
 
     convenience init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 720, height: 440),
+            contentRect: NSRect(origin: .zero, size: WelcomeView.size),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -20,7 +20,11 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         window.title = "Welcome to PicaMD"
         window.titlebarAppearsTransparent = true
         window.titleVisibility = .hidden
+        window.titlebarSeparatorStyle = .none
         window.isMovableByWindowBackground = true
+        // Close only: the board draws all three lights, but a fixed-size
+        // launcher has nothing to zoom, and minimising it would leave the
+        // app without a visible window (Xcode's welcome window does the same).
         window.standardWindowButton(.miniaturizeButton)?.isHidden = true
         window.standardWindowButton(.zoomButton)?.isHidden = true
         window.isRestorable = false                 // never resurrected on relaunch
@@ -54,20 +58,33 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         // re-query NSApp.mainWindow on the main actor instead.
         Task { @MainActor [weak self] in
             guard let self = self, let welcome = self.window else { return }
+            // Only a *document* window replaces the hub. Settings (⌘,)
+            // becoming main used to hide it too, leaving no window at all
+            // once Settings was closed.
             if let main = NSApp.mainWindow, main !== welcome {
-                welcome.orderOut(nil)
+                let isDocument = NSDocumentController.shared.document(for: main) != nil
+                let isSettings = main.identifier?.rawValue.contains("Settings") == true
+                if isDocument || !isSettings {
+                    welcome.orderOut(nil)
+                }
             }
         }
     }
 
     /// Show (or re-front) the welcome window and bring the app forward.
     func present() {
-        // Rebuild the view so the recents list is fresh each time.
+        // Re-read recents (files trashed or deleted since) and rebuild the
+        // view so the accent and the first-row selection are current.
+        RecentDocumentsMenuModel.shared.refresh()
         window?.contentView = NSHostingView(rootView: makeView())
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
+
+    /// The document's own types, as File ▸ Open (⌘O) uses: Markdown and
+    /// plain text. Only `.md` used to be selectable here.
+    static var openContentTypes: [UTType] { MarkdownDocument.readableContentTypes }
 
     // MARK: - View
 
@@ -75,9 +92,8 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         WelcomeView(
             onNew: { [weak self] in self?.newDocument() },
             onOpen: { [weak self] in self?.openDocument() },
-            onOpenRecent: { [weak self] url in self?.openRecent(url) },
-            onClearRecents: { RecentDocumentsStore.clear() },
-            recents: RecentDocumentsStore.urls()
+            onOpenRecent: { RecentDocumentsStore.open($0) },
+            recents: RecentDocumentsMenuModel.shared
         )
     }
 
@@ -88,12 +104,6 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         NSDocumentController.shared.newDocument(nil)
     }
 
-    private func openRecent(_ url: URL) {
-        NSDocumentController.shared.openDocument(withContentsOf: url, display: true) { _, _, error in
-            if let error = error { NSAlert(error: error).runModal() }
-        }
-    }
-
     private func openDocument() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -101,9 +111,7 @@ final class WelcomeWindowController: NSWindowController, NSWindowDelegate {
         panel.allowsMultipleSelection = false
         panel.message = "Choose a Markdown file to open."
         panel.prompt = "Open"
-        if let md = UTType(filenameExtension: "md") {
-            panel.allowedContentTypes = [md]
-        }
+        panel.allowedContentTypes = Self.openContentTypes
         // Sheet on the welcome window — NOT runModal() — so we never block
         // the runloop (and never trip the XCTest hang the old modal panel did).
         guard let window = window else { return }

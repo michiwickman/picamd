@@ -304,6 +304,19 @@ final class ToolImplementationTests: XCTestCase {
         XCTAssertEqual(after, "line 1\nREPLACED\nline 5")
     }
 
+    func testReplaceLinesTreatsATrailingNewlineAsTheTerminator() throws {
+        let original = (1...3).map { "line \($0)" }.joined(separator: "\n")
+        try original.write(toFile: tempPath, atomically: true, encoding: .utf8)
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any,
+            "start": 2,
+            "end": 2,
+            "text": "NEW\n",
+        ])
+        let after = try String(contentsOfFile: tempPath, encoding: .utf8)
+        XCTAssertEqual(after, "line 1\nNEW\nline 3", "no stray blank line")
+    }
+
     func testReadSectionReturnsHeadingSubtree() throws {
         let source = """
         # Doc
@@ -345,6 +358,94 @@ final class ToolImplementationTests: XCTestCase {
         // Trailing newline + paragraph break + new content + final newline.
         XCTAssertTrue(after.contains("existing body"))
         XCTAssertTrue(after.contains("\n\nnew content"))
+    }
+
+    // MARK: - Encoding, byte order mark and line breaks survive an edit
+
+    private func bytes() throws -> [UInt8] {
+        [UInt8](try Data(contentsOf: URL(fileURLWithPath: tempPath)))
+    }
+
+    func testReplaceLinesKeepsAUTF8ByteOrderMark() throws {
+        try Data([0xEF, 0xBB, 0xBF] + Array("# Titel\nalt\n".utf8)).write(to: URL(fileURLWithPath: tempPath))
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any, "start": 2, "end": 2, "text": "neu",
+        ])
+        XCTAssertEqual(try bytes(), [0xEF, 0xBB, 0xBF] + Array("# Titel\nneu\n".utf8))
+    }
+
+    func testEditsKeepCRLFLineBreaks() throws {
+        try Data("one\r\ntwo\r\nthree\r\n".utf8).write(to: URL(fileURLWithPath: tempPath))
+        let read = try DocumentTools.readLines().invoke([
+            "path": tempPath as Any, "start": 1, "end": 2,
+        ]) as? [String: Any]
+        XCTAssertEqual(read?["text"] as? String, "one\ntwo", "no stray \\r in what the client sees")
+
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any, "start": 2, "end": 2, "text": "TWO\nTWO B",
+        ])
+        XCTAssertEqual(try bytes(), Array("one\r\nTWO\r\nTWO B\r\nthree\r\n".utf8))
+
+        _ = try DocumentTools.appendText().invoke(["path": tempPath as Any, "text": "end"])
+        XCTAssertEqual(try bytes(), Array("one\r\nTWO\r\nTWO B\r\nthree\r\n\r\nend\r\n".utf8))
+    }
+
+    /// "\r\r\n" counts as a CRLF file (as many CRLF as LF). The read
+    /// leaves the first CR in place; the write must not take it out.
+    func testEditKeepsACarriageReturnInFrontOfACRLF() throws {
+        try Data("a\r\r\nb\r\nc\r\n".utf8).write(to: URL(fileURLWithPath: tempPath))
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any, "start": 3, "end": 3, "text": "C",
+        ])
+        XCTAssertEqual(try bytes(), Array("a\r\r\nb\r\nC\r\n".utf8),
+                       "the line the edit did not touch keeps its bytes")
+    }
+
+    /// A client that sends CRLF: its trailing line break is the terminator,
+    /// not an extra empty line.
+    func testReplaceLinesTreatsATrailingCRLFAsTheTerminator() throws {
+        try "line 1\nline 2\nline 3".write(toFile: tempPath, atomically: true, encoding: .utf8)
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any, "start": 2, "end": 2, "text": "NEW\r\n",
+        ])
+        let after = try String(contentsOfFile: tempPath, encoding: .utf8)
+        XCTAssertEqual(after, "line 1\nNEW\nline 3", "no stray blank line and no stray CR")
+    }
+
+    /// A file with mixed breaks keeps them, so it can end in "\r\n". That is
+    /// one line break, and the paragraph break needs only one more.
+    func testAppendAfterAFinalCRLFInAMixedFileAddsOneBreak() throws {
+        try Data("one\ntwo\r\n".utf8).write(to: URL(fileURLWithPath: tempPath))
+        _ = try DocumentTools.appendText().invoke(["path": tempPath as Any, "text": "end"])
+        XCTAssertEqual(try bytes(), Array("one\ntwo\r\n\nend\n".utf8))
+    }
+
+    func testTrailingLineBreaksCountsCRLFOnce() {
+        XCTAssertEqual(trailingLineBreaks("a"), 0)
+        XCTAssertEqual(trailingLineBreaks("a\r\n"), 1)
+        XCTAssertEqual(trailingLineBreaks("a\n\r\n"), 2)
+        XCTAssertEqual(trailingLineBreaks("a\r\n\r\n"), 2)
+        XCTAssertEqual(trailingLineBreaks("a\r"), 0)
+    }
+
+    func testWindows1252FileIsEditedIn1252() throws {
+        let original: [UInt8] = Array("Gr".utf8) + [0xFC, 0xDF] + Array("e\nalt\n".utf8)
+        try Data(original).write(to: URL(fileURLWithPath: tempPath))
+        _ = try DocumentTools.replaceLines().invoke([
+            "path": tempPath as Any, "start": 2, "end": 2, "text": "Maße",
+        ])
+        XCTAssertEqual(try bytes(), Array("Gr".utf8) + [0xFC, 0xDF] + Array("e\nMa".utf8) + [0xDF] + Array("e\n".utf8))
+    }
+
+    /// The sidecar never converts a file to another encoding; PicaMD
+    /// itself tells the user when it has to.
+    func testEditThe1252EncodingCannotHoldIsRefused() throws {
+        let original: [UInt8] = Array("Gr".utf8) + [0xFC, 0xDF] + Array("e\n".utf8)
+        try Data(original).write(to: URL(fileURLWithPath: tempPath))
+        XCTAssertThrowsError(try DocumentTools.appendText().invoke([
+            "path": tempPath as Any, "text": "Pfeil →",
+        ]))
+        XCTAssertEqual(try bytes(), original)
     }
 
     // MARK: - Scope guard (P0 security fix)

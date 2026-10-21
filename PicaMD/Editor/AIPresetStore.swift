@@ -17,9 +17,16 @@ final class AIPresetStore: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
-        if let data = defaults.data(forKey: storageKey),
-           let decoded = try? JSONDecoder().decode([AIPreset].self, from: data) {
-            self.presets = decoded
+        if let data = defaults.data(forKey: storageKey) {
+            do {
+                self.presets = try JSONDecoder().decode([AIPreset].self, from: data)
+            } catch {
+                // Unreadable (e.g. written by a newer PicaMD). Run on the
+                // starter set for this session but DON'T save it — that
+                // would overwrite the user's own presets for good.
+                NSLog("PicaMD: couldn't decode AI presets, using defaults without saving: \(error)")
+                self.presets = AIPreset.defaults
+            }
         } else {
             self.presets = AIPreset.defaults
             // Persist the seed so subsequent loads are stable — and so

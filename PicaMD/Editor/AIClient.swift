@@ -1,31 +1,40 @@
 import Foundation
 
-/// Multi-provider HTTP client for LLM completions.
+/// The one thing `AICommandExecutor` needs from a provider: turn a
+/// system prompt and the user's text into an answer.
 ///
-/// `AIClient` is provider-agnostic — request shape and response
-/// parsing are delegated to `AIRequestBuilder` and `AIProvider`
-/// (see `AIProvider.swift`). The client itself just orchestrates:
-/// build the request, hit the network, decode the body, surface
-/// errors.
+/// A cut-off answer is not returned: implementations throw
+/// `AIError.truncated` (and `AIError.refused` for a refusal) so that
+/// nothing half-finished ever replaces the user's selection. Cancelling
+/// the calling task surfaces as `CancellationError` (or
+/// `URLError.cancelled` from URLSession), never as a provider error.
+protocol AICompleting: Sendable {
+    func complete(systemPrompt: String?, userText: String, maxTokens: Int) async throws -> String
+}
+
+/// HTTP client for the Anthropic and OpenAI(-compatible) APIs.
 ///
-/// Three providers are supported out of the box:
-///   - `.anthropic` — `api.anthropic.com/v1/messages`
-///   - `.openai` — `api.openai.com/v1/chat/completions`
-///   - `.localOpenAICompat` — LM Studio / Ollama / llama.cpp / vLLM /
-///     any custom URL the user points us at, no auth required.
-struct AIClient {
-    let provider: AIProvider
+/// `AIClient` is format-agnostic — request shape and response parsing
+/// are delegated to `AIRequestBuilder` and `AIAPIFormat` (see
+/// `AIProvider.swift`). The client itself just orchestrates: build the
+/// request, hit the network, decode the body, surface errors.
+///
+/// Serves the built-in Anthropic and OpenAI entries and every
+/// user-defined OpenAI-compatible provider (any URL the user points us
+/// at, key optional).
+struct AIClient: AICompleting {
+    let format: AIAPIFormat
     let endpoint: URL
     let model: String
     let apiKey: String?
     let session: URLSession
 
-    init(provider: AIProvider,
+    init(format: AIAPIFormat,
           endpoint: URL,
           model: String,
           apiKey: String?,
           session: URLSession = .shared) {
-        self.provider = provider
+        self.format = format
         self.endpoint = endpoint
         self.model = model
         self.apiKey = apiKey
@@ -35,33 +44,41 @@ struct AIClient {
     /// Convenience init that resolves the endpoint URL from a string.
     /// Returns `nil` if the URL is unparseable. Treats an empty
     /// `apiKey` as `nil`.
-    init?(provider: AIProvider,
+    init?(format: AIAPIFormat,
            endpointString: String,
            model: String,
            apiKey: String?,
            session: URLSession = .shared) {
-        guard let url = URL(string: endpointString),
-              let scheme = url.scheme?.lowercased(),
-              scheme == "http" || scheme == "https",   // reject file://, ftp://, etc.
-              url.host != nil else {
-            return nil
-        }
-        self.init(provider: provider,
+        guard let url = Self.endpointURL(from: endpointString) else { return nil }
+        self.init(format: format,
                    endpoint: url,
                    model: model,
                    apiKey: (apiKey?.isEmpty == false) ? apiKey : nil,
                    session: session)
     }
 
+    /// `endpointString` as an http(s) URL with a host, else `nil`
+    /// (rejects file://, ftp://, bare paths, typos without a scheme).
+    static func endpointURL(from endpointString: String) -> URL? {
+        guard let url = URL(string: endpointString.trimmingCharacters(in: .whitespacesAndNewlines)),
+              let scheme = url.scheme?.lowercased(),
+              scheme == "http" || scheme == "https",
+              url.host != nil else {
+            return nil
+        }
+        return url
+    }
+
     /// Single round-trip completion. Caller waits via `await`.
-    func complete(userPrompt: String, systemPrompt: String? = nil) async throws -> String {
+    func complete(systemPrompt: String?, userText: String, maxTokens: Int) async throws -> String {
         let req = AICompletionRequest(
-            userPrompt: userPrompt,
+            userPrompt: userText,
             systemPrompt: systemPrompt,
-            model: model
+            model: model,
+            maxTokens: maxTokens
         )
         let urlRequest = try AIRequestBuilder.build(
-            provider: provider,
+            format: format,
             endpoint: endpoint,
             apiKey: apiKey,
             request: req
@@ -75,15 +92,14 @@ struct AIClient {
             let bodyText = String(data: data, encoding: .utf8) ?? ""
             throw AIError.serverError(status: http.statusCode, body: bodyText)
         }
-        return try provider.parseResponseText(data)
+        return try format.parseResponseText(data)
     }
 
-    // MARK: - OpenAI parser (kept here, re-used by `AIProvider`)
+    // MARK: - OpenAI parser (kept here, re-used by `AIAPIFormat`)
 
-    /// Parse an OpenAI-shape chat-completion response. Used by both
-    /// `.openai` and `.localOpenAICompat` paths via
-    /// `AIProvider.parseResponseText`. Public-internal so the
-    /// per-provider response parsers can route here.
+    /// Parse an OpenAI-shape chat-completion response. Used by the
+    /// built-in OpenAI entry and by custom providers via
+    /// `AIAPIFormat.parseResponseText`.
     static func parseChatResponse(_ data: Data) throws -> String {
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw AIError.invalidResponse("top-level JSON not an object")
@@ -96,11 +112,20 @@ struct AIClient {
               let first = choices.first else {
             throw AIError.invalidResponse("no choices in response")
         }
+        switch first["finish_reason"] as? String {
+        case "length":
+            throw AIError.truncated
+        case "content_filter":
+            throw AIError.refused(nil)
+        default:
+            break
+        }
         if let message = first["message"] as? [String: Any],
            let content = message["content"] as? String {
             return content
         }
-        // Older llama.cpp returns `text` instead of `message.content`.
+        // Older llama.cpp returns `text` instead of `message.content`;
+        // custom providers can point at such a server.
         if let text = first["text"] as? String {
             return text
         }
@@ -108,18 +133,44 @@ struct AIClient {
     }
 }
 
-enum AIError: LocalizedError {
+enum AIError: LocalizedError, Equatable {
     case invalidResponse(String)
     case serverError(status: Int, body: String)
+    /// The model hit its output limit mid-answer.
+    case truncated
+    /// The provider declined to answer. Carries the provider's reason
+    /// when it gives one (Anthropic's `stop_details`).
+    case refused(String?)
+    /// Apple Intelligence can't run right now; the text says why and
+    /// what to do.
+    case appleIntelligenceUnavailable(String)
+    /// Checked before anything runs: the on-device context window is
+    /// small, and overrunning it fails only after the full generation
+    /// time (measured: 83–95 s). `limit` is the largest input that fits.
+    case tooLongForAppleIntelligence(tokens: Int, limit: Int)
+    /// Any other on-device failure, already phrased for the user.
+    case appleIntelligence(String)
 
     var errorDescription: String? {
         switch self {
+        case .truncated:
+            return "The AI's answer was cut off at the output limit, so nothing was changed. Try a shorter selection."
+        case .refused(let reason):
+            let base = "The AI declined to answer this request, so nothing was changed."
+            guard let reason, !reason.isEmpty else { return base }
+            return base + "\n\n" + reason
         case .invalidResponse(let why):
             return "Unexpected response from AI server: \(why)"
         case .serverError(let status, let body):
             let trimmedBody = body.prefix(500)
             return "AI server returned \(status)" +
                    (body.isEmpty ? "" : ":\n\(trimmedBody)")
+        case .appleIntelligenceUnavailable(let message):
+            return message
+        case .tooLongForAppleIntelligence(let tokens, let limit):
+            return "This selection is too long for Apple Intelligence (\(tokens.formatted()) of \(limit.formatted()) tokens). Use Anthropic or OpenAI for long texts."
+        case .appleIntelligence(let message):
+            return message
         }
     }
 }

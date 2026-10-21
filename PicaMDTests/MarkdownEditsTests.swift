@@ -157,6 +157,27 @@ final class MarkdownEditsTests: XCTestCase {
 
     // MARK: - Smart punctuation
 
+    /// The trigger test runs before the document scan in `insertText`, so
+    /// it must accept every character smart punctuation can rewrite after
+    /// and nothing else.
+    func testSmartPunctuationTriggerMatchesTheRewrites() {
+        let contexts = ["Hello ", "Hello -", "Hello –", "Hello ..", "x", ""]
+        for scalar in (0x20...0x7E).compactMap(UnicodeScalar.init) {
+            let input = String(Character(scalar))
+            var rewrites = false
+            for context in contexts {
+                let text = context + input
+                let cursor = NSRange(location: (text as NSString).length, length: 0)
+                if MarkdownEdits.smartPunctuation(after: input, in: text, selection: cursor) != nil {
+                    rewrites = true
+                }
+            }
+            XCTAssertEqual(MarkdownEdits.isSmartPunctuationTrigger(input), rewrites,
+                           "trigger set and rewrites disagree on \(input)")
+        }
+        XCTAssertFalse(MarkdownEdits.isSmartPunctuationTrigger("ab"))
+    }
+
     func testSmartDoubleHyphenToEnDash() {
         // Simulate: text already contains the just-typed second `-`
         let text = "Hello --"

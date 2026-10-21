@@ -115,4 +115,48 @@ final class MCPServerTests: XCTestCase {
         XCTAssertEqual(error["code"] as? Int, -32600,
                        "JSON-RPC 'Invalid request' code must be -32600")
     }
+
+    // MARK: - notifications never get a reply
+
+    func testUnknownNotificationGetsNoResponse() throws {
+        let server = MCPServer()
+        let response = try send([
+            "jsonrpc": "2.0",
+            "method": "notifications/cancelled",
+            "params": ["requestId": 7],
+        ], to: server)
+        XCTAssertTrue(response.isEmpty, "JSON-RPC forbids answering a notification")
+    }
+
+    // MARK: - tool failures are results, unknown tools are errors
+
+    func testFailingToolReturnsIsErrorResult() throws {
+        let server = MCPServer()
+        let response = try send([
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/call",
+            "params": [
+                "name": "document.readLines",
+                "arguments": ["path": "/definitely/not/open-\(UUID().uuidString).md", "start": 1, "end": 1],
+            ],
+        ], to: server)
+        let result = try XCTUnwrap(response["result"] as? [String: Any],
+                                   "a tool that ran and failed is a result, not a JSON-RPC error")
+        XCTAssertEqual(result["isError"] as? Bool, true)
+        let content = try XCTUnwrap(result["content"] as? [[String: Any]])
+        XCTAssertFalse((content.first?["text"] as? String ?? "").isEmpty)
+    }
+
+    func testUnknownToolIsInvalidParams() throws {
+        let server = MCPServer()
+        let response = try send([
+            "jsonrpc": "2.0",
+            "id": 10,
+            "method": "tools/call",
+            "params": ["name": "no.such.tool", "arguments": [:] as [String: Any]],
+        ], to: server)
+        let error = try XCTUnwrap(response["error"] as? [String: Any])
+        XCTAssertEqual(error["code"] as? Int, -32602)
+    }
 }

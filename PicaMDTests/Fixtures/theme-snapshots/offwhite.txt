@@ -1,0 +1,61 @@
+0+2 font=.AppleSystemUIFont@0.01 fg=#00000000 ul=1 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+2+5 font=.AppleSystemUIFontBold@36.0 fg=#905727 ul=1 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+7+1 font=.AppleSystemUIFont@13.5 fg=#272620 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+8+16 font=.AppleSystemUIFont@13.5 fg=#272620
+24+2 font=.AppleSystemUIFont@0.01 fg=#00000000
+26+4 font=.SFNS-Bold@13.5 fg=#272620
+30+2 font=.AppleSystemUIFont@0.01 fg=#00000000
+32+2 font=.AppleSystemUIFont@13.5 fg=#272620
+34+1 font=.AppleSystemUIFont@0.01 fg=#00000000
+35+6 font=.SFNS-RegularItalic@13.5 fg=#272620
+41+1 font=.AppleSystemUIFont@0.01 fg=#00000000
+42+2 font=.AppleSystemUIFont@13.5 fg=#272620
+44+1 font=.AppleSystemUIFont@0.01 fg=#00000000
+45+11 font=.AppleSystemUIFontMonospaced-Regular@13.0 fg=#2c2a22 bg=#efebe0
+56+1 font=.AppleSystemUIFont@0.01 fg=#00000000
+57+2 font=.AppleSystemUIFont@13.5 fg=#272620
+59+2 font=.AppleSystemUIFont@0.01 fg=#00000000 bg=#f2d93373
+61+4 font=.AppleSystemUIFont@13.5 fg=#272620 bg=#f2d93373
+65+2 font=.AppleSystemUIFont@0.01 fg=#00000000 bg=#f2d93373
+67+7 font=.AppleSystemUIFont@13.5 fg=#272620
+74+1 font=.AppleSystemUIFont@0.01 fg=#00000000
+75+4 font=.AppleSystemUIFont@13.5 fg=#b66a2a ul=1
+79+22 font=.AppleSystemUIFont@0.01 fg=#00000000
+101+3 font=.AppleSystemUIFont@13.5 fg=#272620
+104+3 font=.AppleSystemUIFont@0.01 fg=#00000000 ul=1 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+107+7 font=.AppleSystemUIFontBold@24.0 fg=#905727 ul=1 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+114+1 font=.AppleSystemUIFont@13.5 fg=#272620 para=0.0/0.0/0.0/0.0/6.0/4.0/0.0
+115+1 font=.AppleSystemUIFont@13.5 fg=#272620
+116+1 font=.AppleSystemUIFontMonospaced-Semibold@13.5 fg=#b66a2a
+117+10 font=.AppleSystemUIFont@13.5 fg=#272620
+127+1 font=.AppleSystemUIFontMonospaced-Semibold@13.5 fg=#b66a2a
+128+1 font=.AppleSystemUIFont@13.5 fg=#272620
+129+3 font=.AppleSystemUIFont@13.5 fg=#00000000
+132+11 font=.AppleSystemUIFont@13.5 fg=#272620
+143+1 font=.AppleSystemUIFontMonospaced-Semibold@13.5 fg=#b66a2a
+144+1 font=.AppleSystemUIFont@13.5 fg=#272620
+145+3 font=.AppleSystemUIFont@13.5 fg=#00000000
+148+1 font=.AppleSystemUIFont@13.5 fg=#272620
+149+9 font=.AppleSystemUIFont@13.5 fg=#3c372880 st=1
+158+2 font=.AppleSystemUIFont@13.5 fg=#272620
+160+2 font=.AppleSystemUIFont@0.01 fg=#00000000 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+162+13 font=.SFNS-RegularItalic@13.5 fg=#3c372880 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+175+1 font=.AppleSystemUIFont@13.5 fg=#272620 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+176+1 font=.AppleSystemUIFont@13.5 fg=#272620
+177+4 font=.AppleSystemUIFont@0.01 fg=#00000000
+181+5 font=.AppleSystemUIFontBold@18.0 fg=#905727
+186+2 font=.AppleSystemUIFont@13.5 fg=#272620
+188+9 font=.AppleSystemUIFont@0.01 fg=#00000000 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+197+3 font=.AppleSystemUIFontMonospaced-Regular@13.0 fg=#a6331a para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+200+5 font=.AppleSystemUIFontMonospaced-Regular@13.0 fg=#2c2a22 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+205+1 font=.AppleSystemUIFontMonospaced-Regular@13.0 fg=#8c4d0d para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+206+1 font=.AppleSystemUIFontMonospaced-Regular@13.0 fg=#2c2a22 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+207+4 font=.AppleSystemUIFont@0.01 fg=#00000000 para=0.0/0.0/14.0/14.0/0.0/0.0/0.0
+211+14 font=.AppleSystemUIFont@13.5 fg=#272620
+225+4 font=.AppleSystemUIFont@10.5 fg=#b66a2a
+229+3 font=.AppleSystemUIFont@13.5 fg=#272620
+232+4 font=.AppleSystemUIFont@12.5 fg=#3c372880
+236+2 font=.AppleSystemUIFont@12.5 fg=#3c372880
+238+11 font=.AppleSystemUIFont@13.5 fg=#272620
+249+4 font=.AppleSystemUIFontBold@16.0 fg=#3c372880
+253+7 font=.AppleSystemUIFontBold@16.0 fg=#905727

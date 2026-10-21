@@ -31,10 +31,10 @@ Ordered:
 Footnote
 
 Tasks:
-- [ ] Done thing — should be struck through and dimmed
+- [x] Done thing — should be struck through and dimmed
 - [ ] Open thing — should show empty box
 - [ ] Another open thing
-- [ ] Uppercase X also counts as checked
+- [X] Uppercase X also counts as checked
 * [x] Star bullet works too
 + [ ] Plus bullet works too
   - [ ] Indented unchecked item
@@ -102,7 +102,6 @@ $$
 <summary>Click to expand</summary>
 
 This is hidden by default. Press <kbd>Space</kbd>  to toggle.
-nd welchen usp haben wiroch örtw
 </details>
 
 ## Footnote

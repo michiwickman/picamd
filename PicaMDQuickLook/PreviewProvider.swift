@@ -27,7 +27,14 @@ final class PreviewProvider: QLPreviewProvider, QLPreviewingController {
     func providePreview(for request: QLFilePreviewRequest,
                         completionHandler: @escaping (QLPreviewReply?, Error?) -> Void) {
         do {
-            let source = try String(contentsOf: request.fileURL, encoding: .utf8)
+            // Decoded the way the app opens files: a Windows 1252 or UTF-16
+            // file opened in PicaMD but showed no preview.
+            let bytes = try Data(contentsOf: request.fileURL)
+            guard let source = TextFileEncoding.decode(bytes)?.text else {
+                throw NSError(domain: "PicaMD.QuickLook",
+                              code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Not in a text encoding PicaMD opens"])
+            }
             let title = request.fileURL.deletingPathExtension().lastPathComponent
             let html = MarkdownToHTML.render(source, title: title)
             guard let data = html.data(using: .utf8) else {

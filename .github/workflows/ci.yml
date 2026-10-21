@@ -13,20 +13,27 @@ concurrency:
 
 jobs:
   build-and-test:
-    name: Build and test (Release)
-    runs-on: macos-15
+    name: Build and test (Release, Xcode 27)
+    # macOS 27.0.1 with Xcode 27.0 as the image default. The deployment
+    # target is macOS 27.0, which older Xcode releases cannot build, so
+    # there is no second toolchain job.
+    runs-on: xcode-27
     timeout-minutes: 25
 
     env:
-      DEVELOPER_DIR: /Applications/Xcode_16.app/Contents/Developer
-      # 12 MB ceiling: 7.1 MB app + ~2.7 MB Sparkle framework + headroom.
-      # Bumped from 8 MB when Sparkle was added in Phase 12 (auto-update
-      # is mandatory for a public release; the bundle weight is the cost).
-      BUNDLE_SIZE_LIMIT_MB: 12
+      # 10 MB ceiling (MiB, as `du -sk` / 1024 / 1024 below). Measured on
+      # the uninstrumented Release bundle of 0.10.0 (2026-10-21, local
+      # build): 8.8 MiB = 2.9 app binary + 2.5 Sparkle + 1.0 Quick Look
+      # extension + 1.7 Assets.car (the Icon Composer icon) + 0.6 other
+      # resources incl. the MCP sidecar and KaTeX. A 9 MiB limit left
+      # 0.2 MiB, so the next small feature would have tripped it; 10 MiB
+      # leaves about 1.2 MiB. The old 12 MB limit was calibrated against a
+      # coverage-instrumented build (10.1 MB).
+      BUNDLE_SIZE_LIMIT_MB: 10
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Show toolchain
         run: |
@@ -35,12 +42,15 @@ jobs:
           swift --version
 
       - name: Install build tools
-        run: brew install xcodegen xcbeautify
+        # xcbeautify ships with the runner image, xcodegen does not.
+        run: brew install xcodegen
 
       - name: Generate Xcode project
         run: xcodegen generate
 
       - name: Run unit tests — main bundle
+        # Coverage is requested here rather than in the scheme: the
+        # scheme flag would also instrument the Release build below.
         run: |
           set -o pipefail
           xcodebuild \
@@ -48,6 +58,7 @@ jobs:
             -scheme PicaMD \
             -destination 'platform=macOS' \
             -resultBundlePath build-test/MainTests.xcresult \
+            -enableCodeCoverage YES \
             -only-testing:PicaMDTests \
             test | xcbeautify
 
@@ -63,6 +74,7 @@ jobs:
             -scheme PicaMD \
             -destination 'platform=macOS' \
             -resultBundlePath build-test/MCPTests.xcresult \
+            -enableCodeCoverage YES \
             -only-testing:PicaMDMCPTests \
             test | xcbeautify
 
@@ -107,9 +119,8 @@ jobs:
 
           # 1. The main binary's direct dependencies must be either
           #    Apple system libs (/System, /usr) or whitelisted
-          #    embedded frameworks (Sparkle for auto-update — see
-          #    Phase 12 in CHANGELOG.md). Anything else is an
-          #    accidentally-bundled third-party dep.
+          #    embedded frameworks (Sparkle, for auto-update).
+          #    Anything else is an accidentally-bundled third-party dep.
           ALLOWED_RPATH='@rpath/Sparkle\.framework/'
           NON_APPLE=$(otool -L "$BIN" \
             | tail -n +2 \
@@ -141,7 +152,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: build-test/
@@ -149,7 +160,7 @@ jobs:
 
       - name: Upload Release bundle
         if: success()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PicaMD-${{ github.sha }}.app
           path: build-release/Build/Products/Release/PicaMD.app

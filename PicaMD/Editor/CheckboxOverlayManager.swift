@@ -4,9 +4,9 @@ import AppKit
 /// fields cover everything the highlighter and overlay manager need
 /// without making either re-parse the line.
 struct TaskListMatch: Hashable, Sendable {
-    /// Range of the entire line — used for `cursor.touches(...)` so we
-    /// can hide the overlay while the caret is on the line and let the
-    /// user edit the raw `[ ]` markup.
+    /// Range of the entire line — used with `cursor.touchesBlock(...)` by
+    /// both the highlighter and the overlay manager, so the overlay hides
+    /// while the caret is on the line and the user edits the raw `[ ]`.
     let lineRange: NSRange
     /// Range of the literal `[ ]` or `[x]` (always 3 characters).
     let boxRange: NSRange
@@ -55,6 +55,9 @@ final class CheckboxOverlayManager {
     private var lastMatches: [TaskListMatch] = []
     private var lastCursorRanges: [NSRange] = []
     private var lastProtectedRanges: [NSRange] = []
+    private var lastAccent: NSColor?
+    private var lastBackground: NSColor?
+    private var lastTaskTexts: [String] = []
 
     /// Cached size of one checkbox in points. Tuned so the box visually
     /// matches the cap-height of the editor's body font at the default
@@ -87,15 +90,27 @@ final class CheckboxOverlayManager {
         // Fast-path: if nothing that affects layout/visibility changed,
         // skip the full rebind loop. We must compute liveMatches first
         // (above) since it derives from protectedRanges.
-        if liveMatches == lastMatches,
+        let accent = theme.effectiveAccent
+        let bgFill = theme.palette.bg
+        // The item text names each checkbox for VoiceOver. Compared too:
+        // retyping a task without changing its length keeps every range.
+        let source = textView.string as NSString
+        let taskTexts = liveMatches.map { match -> String in
+            guard NSMaxRange(match.textRange) <= source.length else { return "" }
+            return source.substring(with: match.textRange)
+        }
+        if liveMatches == lastMatches, taskTexts == lastTaskTexts,
            cursorActiveRanges == lastCursorRanges,
-           protectedRanges == lastProtectedRanges {
+           protectedRanges == lastProtectedRanges,
+           accent == lastAccent, bgFill == lastBackground {
+            // Same checkboxes, but the text around them may have reflowed
+            // (resize, outline toggle, a math block reporting its height)
+            // — follow the glyphs instead of staying on the old lines.
+            reposition()
             return
         }
 
         let storageLength = textView.textStorage?.length ?? 0
-        let accent = theme.effectiveAccent
-        let bgFill = theme.palette.bg
 
         // Grow pool if we need more views.
         while pool.count < liveMatches.count {
@@ -131,13 +146,18 @@ final class CheckboxOverlayManager {
                 self?.onToggle?(capturedRange, !capturedChecked)
             }
             view.isChecked = match.checked
+            view.taskText = taskTexts[i]
             view.accentColor = accent
             view.backgroundFillColor = bgFill
 
             // Hide while the cursor is on the line so the user edits
             // raw markup, matching the existing concealment pattern
-            // used by every other inline syntax token.
-            let active = cursorActiveRanges.contains { intersects($0, match.lineRange) }
+            // used by every other inline syntax token. Same predicate as
+            // the highlighter's reveal (`touchesBlock`, shared with the
+            // block overlays): a private `intersects` lacked its one-
+            // character lead, so with the caret at the end of the line
+            // above, `[ ]` was revealed under a still-drawn checkbox.
+            let active = cursorActiveRanges.contains { $0.touchesBlock(match.lineRange) }
             view.isHidden = active
 
             if !active {
@@ -150,6 +170,9 @@ final class CheckboxOverlayManager {
         lastMatches = liveMatches
         lastCursorRanges = cursorActiveRanges
         lastProtectedRanges = protectedRanges
+        lastAccent = accent
+        lastBackground = bgFill
+        lastTaskTexts = taskTexts
     }
 
     /// Re-position visible views in response to scroll / resize. Cheap
@@ -252,11 +275,5 @@ final class CheckboxOverlayManager {
             width: boxSize,
             height: boxSize
         )
-    }
-
-    private func intersects(_ a: NSRange, _ b: NSRange) -> Bool {
-        let aEnd = a.location + a.length
-        let bEnd = b.location + b.length
-        return a.location <= bEnd && b.location <= aEnd
     }
 }

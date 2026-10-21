@@ -42,6 +42,21 @@ enum UserDefaultsMigration {
     /// future migrations can be added without colliding.
     private static let markerKey = "PicaMD.migration.fromQuickMD.v1"
 
+    /// Where QuickMD kept its API keys. The test host looks under a
+    /// service of its own: with the real one, a migration test would copy
+    /// the user's old keys into the test host's items.
+    static let legacyKeychainService = AppEnvironment.isolatesUserData
+        ? "\(AppEnvironment.testHostBundleIdentifier).QuickMD.ai"
+        : "de.michaelwittmann.QuickMD.ai"
+
+    /// QuickMD's preferences file. The test host reads a path that does
+    /// not exist, so its migration never picks up the user's old settings.
+    static let legacyPreferencesURL: URL = AppEnvironment.isolatesUserData
+        ? AppEnvironment.applicationSupportDirectory
+            .appendingPathComponent("de.michaelwittmann.QuickMD.plist")
+        : URL(fileURLWithPath: NSHomeDirectory())
+            .appendingPathComponent("Library/Preferences/de.michaelwittmann.QuickMD.plist")
+
     static func migrateFromQuickMDIfNeeded(defaults: UserDefaults = .standard) {
         guard !defaults.bool(forKey: markerKey) else { return }
         defer { defaults.set(true, forKey: markerKey) }
@@ -57,8 +72,7 @@ enum UserDefaultsMigration {
         // `de.michaelwittmann.PicaMD`, so PicaMD's `.standard` no
         // longer sees the QuickMD keys at all. Read the QuickMD plist
         // directly off disk and copy the values into our domain.
-        let prefsURL = URL(fileURLWithPath: NSHomeDirectory())
-            .appendingPathComponent("Library/Preferences/de.michaelwittmann.QuickMD.plist")
+        let prefsURL = legacyPreferencesURL
 
         guard FileManager.default.fileExists(atPath: prefsURL.path),
               let plistData = try? Data(contentsOf: prefsURL),
@@ -88,8 +102,8 @@ enum UserDefaultsMigration {
     /// new PicaMD entries. Never overwrites a key the user has already
     /// set on the new bundle.
     private static func migrateKeychainFromQuickMD() {
-        let oldService = "de.michaelwittmann.QuickMD.ai"
-        for provider in AIProvider.allCases {
+        let oldService = legacyKeychainService
+        for provider in AIProvider.allCases where provider.requiresAPIKey {
             let newAccount = provider.keychainAccount            // PicaMD.ai.<p>.apiKey
             guard Keychain.get(account: newAccount) == nil else { continue }
             let oldAccount = "QuickMD.ai.\(provider.rawValue).apiKey"

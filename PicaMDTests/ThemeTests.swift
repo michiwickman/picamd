@@ -126,11 +126,11 @@ final class ThemeTests: XCTestCase {
 
     // MARK: ThemeStore + persistence
 
+    private var suiteCount = 0
+
     private func makeIsolatedDefaults() -> UserDefaults {
-        let suite = "PicaMDThemeTest-\(UUID().uuidString)"
-        let d = UserDefaults(suiteName: suite)!
-        d.removePersistentDomain(forName: suite)
-        return d
+        suiteCount += 1
+        return makeTestDefaults("Theme.\(suiteCount)")
     }
 
     func testThemeStoreInitDefaultsWhenNoPersistence() {
@@ -227,5 +227,25 @@ final class ThemeTests: XCTestCase {
         store.setAccent(.pink)
 
         wait(for: [expectation], timeout: 1.0)
+    }
+    /// The word count is information, not decoration: 4.5:1 on every
+    /// palette. `fgMuted` reached only about 3:1 on White and 2.7:1 on
+    /// Off-White. It stays as quiet as that allows.
+    func testWordCountIsReadableOnEveryPalette() {
+        for name in PaletteName.allCases {
+            let p = name.palette
+            XCTAssertGreaterThanOrEqual(Palette.contrast(p.wordCountColor, p.bg), 4.5, name.rawValue)
+            XCTAssertLessThan(Palette.contrast(p.wordCountColor, p.bg),
+                              Palette.contrast(p.fg, p.bg), "still quieter than the text (\(name.rawValue))")
+        }
+        let custom = Palette.custom(background: NSColor(hex: "#fdf6e3"), text: NSColor(hex: "#333333"))
+        XCTAssertGreaterThanOrEqual(Palette.contrast(custom.wordCountColor, custom.bg), 4.5)
+    }
+    func testPresetCardsAreNamedWithoutTheSampleText() {
+        for preset in PresetVariant.allCases {
+            let label = preset.cardAccessibilityLabel
+            XCTAssertTrue(label.hasPrefix(preset.displayName), label)
+            XCTAssertFalse(label.contains("Aa Heading"), label)
+        }
     }
 }

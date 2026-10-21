@@ -61,18 +61,23 @@ final class FileWatcher {
         let cb = { [weak self] (event: Event) in
             self?.onExternalChange?(event)
         }
+        let replaced = { [weak self] (isSelfWrite: Bool) in
+            self?.handleReplacement(isSelfWrite: isSelfWrite)
+        }
         src.setEventHandler {
-            // Filter out writes we triggered ourselves
-            let now = Date()
-            if now.timeIntervalSince(lastSelf.withLock { $0 }) < interval {
-                return
-            }
+            let isSelfWrite = Date().timeIntervalSince(lastSelf.withLock { $0 }) < interval
             let flags = src.data
             if flags.contains(.delete) || flags.contains(.rename) {
-                cb(.renamedOrDeleted)
-            } else {
-                cb(.modified)
+                // The watched inode was swapped out or moved. Atomic
+                // saves do exactly this — ours (NSDocument's safe save),
+                // other editors', git's, the MCP sidecar's — so check
+                // what's at the path now instead of assuming it's gone.
+                replaced(isSelfWrite)
+                return
             }
+            // Filter out writes we triggered ourselves
+            if isSelfWrite { return }
+            cb(.modified)
         }
         src.setCancelHandler { [fd] in
             close(fd)
@@ -82,6 +87,27 @@ final class FileWatcher {
         self.source = src
         self.fileDescriptor = fd
         self.watchedURL = url
+    }
+
+    /// After a delete/rename event: if a file exists at the watched path
+    /// again, re-attach to the new inode — otherwise the watcher keeps
+    /// listening to the orphaned old file and never sees another change
+    /// (which is what happened after the app's own first save). A
+    /// replacement written by someone else is reported as `.modified`
+    /// so the user gets the Reload prompt, not "renamed or deleted".
+    private func handleReplacement(isSelfWrite: Bool) {
+        guard let url = watchedURL else { return }
+        Task { @MainActor [weak self] in
+            // Give the writer a moment to finish its rename/exchange.
+            try? await Task.sleep(for: .milliseconds(150))
+            guard let self, self.watchedURL == url else { return }
+            if FileManager.default.fileExists(atPath: url.path) {
+                self.startWatching(url)
+                if !isSelfWrite { self.onExternalChange?(.modified) }
+            } else if !isSelfWrite {
+                self.onExternalChange?(.renamedOrDeleted)
+            }
+        }
     }
 
     func stop() {

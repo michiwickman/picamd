@@ -15,8 +15,9 @@ a different mode, you're always editing the actual Markdown source.
 ## Try the AI presets
 
 Settings → AI (`⌘,` then click the AI tab) lets you wire up Anthropic
-Claude, OpenAI, or a local LM Studio / Ollama. Off by default. Once
-configured:
+Claude, OpenAI, Apple Intelligence (on-device) or your own
+OpenAI-compatible server such as Ollama or LM Studio. Off by default.
+Once configured:
 
 - Select a paragraph
 - `⌃⌘1` — Bereinige Markdown (cleans typography, em-dashes, etc.)
@@ -79,8 +80,8 @@ Tables:
 | Shortcut | What it does |
 |---|---|
 | `⌘,` | Settings (themes, AI, presets) |
-| `⌘T` | New tab (with macOS tabbing on) |
-| `⌘⇧P` | Command palette (fuzzy over headings) |
+| `⌘T` | New tab in the front window |
+| `⌘⇧P` | Command palette (headings and commands) |
 | `⌃⌘F` | Focus mode (dim non-cursor paragraphs) |
 | `⌃⌘Y` | Typewriter mode (cursor stays centered) |
 | `⌃Space` | AI preset picker |
@@ -115,13 +116,15 @@ Footnotes are real too[^1].
 ## Privacy
 
 Nothing is sent to any server you didn't configure yourself. AI
-endpoints, MCP — all local or directed at your chosen API. No
+providers, MCP — all local or directed at your chosen API. Apple
+Intelligence runs on-device. No
 telemetry, no analytics, no PicaMD-owned proxy. The README covers
 this in detail.
 
 ## Where to next
 
-- **Settings → Palette / Typography** to make this comfortable for
+- **Settings → Appearance** (presets, palette, fonts, line width) and
+  **Settings → Editor** (typing, blocks) to make this comfortable for
   *your* eyes (try Editorial preset for a serif H1 / sans body
   combo).
 - **Add an AI preset** for whatever you do most ("Translate to

@@ -24,7 +24,22 @@ import AppKit
 @MainActor
 final class BlockOverlayManager {
     weak var textView: NSTextView?
-    var documentURL: URL?
+    /// The document's file URL, for resolving relative image paths.
+    /// The first highlight pass runs before the view is in a window, so
+    /// image overlays are often built while this is still nil — they then
+    /// showed "file not found" for every `./assets/…` image until the
+    /// line was edited. Drop them when the URL arrives so the next
+    /// `update` rebuilds them against the right folder.
+    var documentURL: URL? {
+        didSet {
+            guard documentURL != oldValue else { return }
+            for (id, entry) in entries where id.kind == .image {
+                entry.view.removeFromSuperview()
+                entries.removeValue(forKey: id)
+            }
+            probeHeightCache = probeHeightCache.filter { $0.key.kind != .image }
+        }
+    }
 
     /// Stable identity for a block across range shifts. `ordinal`
     /// disambiguates two byte-identical blocks (e.g. two `$$x$$`) so
@@ -36,9 +51,10 @@ final class BlockOverlayManager {
     }
 
     /// One pooled overlay: the view plus the block it currently renders.
-    /// The view's own `block` is immutable (set at creation, content is
-    /// payload-stable for a given identity); `block` here tracks the
-    /// *current* range so `reposition()` follows edits without recreating.
+    /// `block` here tracks the *current* range so `reposition()` follows
+    /// edits without recreating. For content-keyed kinds the view's own
+    /// payload never changes; a position-keyed table view adopts the new
+    /// block in `update()`, so before that its payload can be stale.
     private struct Entry {
         let view: BlockAttachmentView
         var block: ExtractedBlock
@@ -51,13 +67,34 @@ final class BlockOverlayManager {
     private var blockHeights: [BlockIdentity: CGFloat] = [:]
     private var lastBlocks: [ExtractedBlock] = []
 
-    /// Height cache for synchronously-measurable blocks (table, image).
-    /// Keyed on (kind, payload) so the result survives range shifts.
-    private struct ProbeKey: Hashable {
+    /// Content key used only to disambiguate byte-identical blocks when
+    /// assigning ordinals. Deliberately width-free — a resize must not
+    /// renumber blocks.
+    private struct ContentKey: Hashable {
         let kind: BlockKind
         let payload: String
     }
+
+    /// Height cache for synchronously-measurable blocks (table, image).
+    /// Keyed on (kind, payload, width) so the result survives range shifts
+    /// **but not a width change**. Leaving `width` out was a real bug: a
+    /// window resize changes the wrapped height of a table without changing
+    /// its payload, so the highlighter kept reserving the height measured at
+    /// the OLD width until the user happened to edit the block. That is the
+    /// "it fixes itself when I click into the table" symptom. Width is
+    /// quantised to whole points so sub-pixel jitter doesn't defeat the cache.
+    private struct ProbeKey: Hashable {
+        let kind: BlockKind
+        let payload: String
+        let width: Int
+    }
     private var probeHeightCache: [ProbeKey: CGFloat] = [:]
+    /// Quantised width the probe cache currently holds entries for.
+    private var lastProbeWidth: Int = 0
+
+    private func probeKey(for block: ExtractedBlock, width: CGFloat) -> ProbeKey {
+        ProbeKey(kind: block.kind, payload: block.payload, width: Int(width.rounded()))
+    }
     /// Cache of the last-known cursor-active ranges so `refreshLiveSet()`
     /// can re-evaluate the viewport without losing the cursor-overlay-
     /// hiding behaviour.
@@ -77,23 +114,90 @@ final class BlockOverlayManager {
 
     /// Compute a stable identity per block, aligned 1:1 with `blocks`.
     /// `ordinal` counts prior blocks with the same (kind, payload).
+    /// Tables are keyed by their POSITION among the document's tables, not by
+    /// their content: editing one cell must refresh the existing view, not
+    /// replace it, or an open cell editor would be destroyed mid-keystroke.
+    /// It also removes per-keystroke view churn while typing inside a table.
+    ///
+    /// Images, math and mermaid stay content-keyed: there the identity exists
+    /// to stop a view from being torn down and respawned when an unrelated
+    /// edit above merely shifts the block's range. Images in particular must
+    /// NOT be pooled by position: `ImageBlockView` loads its file once, in
+    /// `setupContent()`, so a reused view kept showing — and sizing for — the
+    /// old image after the path changed or an image above it was removed.
     private func identities(for blocks: [ExtractedBlock]) -> [BlockIdentity] {
-        var counts: [ProbeKey: Int] = [:]
+        var contentCounts: [ContentKey: Int] = [:]
+        var tableCount = 0
         return blocks.map { b in
-            let key = ProbeKey(kind: b.kind, payload: b.payload)
-            let ordinal = counts[key, default: 0]
-            counts[key] = ordinal + 1
-            return BlockIdentity(kind: b.kind, payload: b.payload, ordinal: ordinal)
+            switch b.kind {
+            case .table:
+                let ordinal = tableCount
+                tableCount += 1
+                return BlockIdentity(kind: b.kind, payload: "", ordinal: ordinal)
+            case .image, .mathBlock, .mermaid:
+                let key = ContentKey(kind: b.kind, payload: b.payload)
+                let ordinal = contentCounts[key, default: 0]
+                contentCounts[key] = ordinal + 1
+                return BlockIdentity(kind: b.kind, payload: b.payload, ordinal: ordinal)
+            }
         }
+    }
+
+    // MARK: - Geometry: the single source of truth
+
+    /// The ONE width at which every overlay block is both **measured** and
+    /// **drawn**.
+    ///
+    /// This used to be two independent expressions that disagreed by 2 pt:
+    /// the highlighter measured at `textView.bounds.width - inset*2 - 16`
+    /// while `reposition()` drew at `boundingRect.width - 4`. Two points
+    /// sounds harmless, and for most tables it is — but when a cell's text
+    /// happens to sit exactly on a wrap boundary those 2 pt push a word onto
+    /// a new line, the row grows by a full line, and the reserved band no
+    /// longer matches the drawn table. Measured on real documents: 1 table in
+    /// 22 was off, by 16 pt. That is the "usually fine, now and then shifted"
+    /// bug.
+    ///
+    /// Deriving it here — rather than letting callers pass a width in — makes
+    /// the two *unable* to diverge. Note that even a momentarily stale
+    /// container width is harmless now: measurement and drawing read the same
+    /// stale value, stay consistent, and the next pass corrects both.
+    /// Returns `nil` while the text container has no resolved width yet.
+    /// That case is NOT the same as a genuinely narrow window and must not
+    /// be clamped to the minimum: `makeNSView` runs `applyHighlightingNow()`
+    /// before SwiftUI has laid the scroll view out, so `container.size.width`
+    /// is 0. Clamping there reserved every table in the document as if the
+    /// window were 120 pt wide — roughly an eightfold over-reservation — and
+    /// because later passes only rewrite the reservation for blocks inside
+    /// the viewport slice, every table below the fold kept that band until
+    /// the caret happened to visit it.
+    func resolvedContentWidth() -> CGFloat? {
+        guard let container = textView?.textContainer, container.size.width > 0 else {
+            return nil
+        }
+        let usable = container.size.width
+            - 2 * container.lineFragmentPadding
+            - EditorLayout.blockOverlayHorizontalInset
+        return max(EditorLayout.blockOverlayMinWidth, usable)
     }
 
     // MARK: - Public API
 
     /// Compute desired heights for every block, so the highlighter can
     /// reserve enough vertical space (via min-line-height) before the
-    /// overlay views are positioned on top.
-    func desiredHeights(for blocks: [ExtractedBlock], width: CGFloat) -> [ExtractedBlock: CGFloat] {
-        guard width > 0 else { return [:] }
+    /// overlay views are positioned on top. The width is derived internally
+    /// (see `contentWidth()`) — callers must not supply one, or the
+    /// measure/draw agreement this guarantees would be lost again.
+    func desiredHeights(for blocks: [ExtractedBlock]) -> [ExtractedBlock: CGFloat] {
+        guard let width = resolvedContentWidth() else { return [:] }
+        // A live window resize walks through many widths; without this the
+        // cache would accumulate one entry per block per intermediate width.
+        // Only the current width can ever be hit again, so drop the rest.
+        let quantised = Int(width.rounded())
+        if quantised != lastProbeWidth {
+            probeHeightCache = probeHeightCache.filter { $0.key.width == quantised }
+            lastProbeWidth = quantised
+        }
         let ids = identities(for: blocks)
         var out: [ExtractedBlock: CGFloat] = [:]
         for (i, block) in blocks.enumerated() {
@@ -105,22 +209,26 @@ final class BlockOverlayManager {
                 // cache (survives range shifts) before falling back to a
                 // fresh throwaway probe via makeRealView — which is
                 // expensive per highlight pass.
-                if let v = entries[id]?.view, !(v is PlaceholderBlockView) {
-                    v.frame.size.width = width
+                let key = probeKey(for: block, width: width)
+                if let cached = probeHeightCache[key] {
+                    out[block] = cached
+                } else if let v = entries[id]?.view, !(v is PlaceholderBlockView),
+                          v.block.payload == block.payload {
+                    // The pooled view may only be measured when it already
+                    // renders THIS payload. Tables are pooled by position, so
+                    // after an edit the view still holds the previous table
+                    // until `update()` runs — later in the same highlight
+                    // pass. Measuring it then cached the old height under the
+                    // new payload's key, and the band lagged one edit behind
+                    // until the width changed.
                     let h = v.desiredHeight(for: width)
-                    probeHeightCache[ProbeKey(kind: block.kind, payload: block.payload)] = h
+                    probeHeightCache[key] = h
                     out[block] = h
                 } else {
-                    let key = ProbeKey(kind: block.kind, payload: block.payload)
-                    if let cached = probeHeightCache[key] {
-                        out[block] = cached
-                    } else {
-                        let probe = makeRealView(for: block, identity: id)
-                        probe.frame.size.width = width
-                        let h = probe.desiredHeight(for: width)
-                        probeHeightCache[key] = h
-                        out[block] = h
-                    }
+                    let probe = makeRealView(for: block, identity: id)
+                    let h = probe.desiredHeight(for: width)
+                    probeHeightCache[key] = h
+                    out[block] = h
                 }
             case .mathBlock, .mermaid:
                 // Webview height is reported async; reserve last-known
@@ -175,16 +283,37 @@ final class BlockOverlayManager {
                 entries[id] = Entry(view: v, block: block)
                 textView.addSubview(v)
             } else {
-                // Reuse: same content, possibly shifted range. Update the
-                // tracked block so reposition() follows the edit — no
-                // teardown, no WKWebView respawn.
+                // Reuse: same identity, possibly shifted range and — for
+                // position-keyed tables/images — possibly changed content.
+                // Push both, so `reposition()` follows the edit and the view
+                // repaints, with no teardown and no WKWebView respawn.
                 entries[id]?.block = block
+                entries[id]?.view.block = block
+            }
+        }
+
+        // Rebind the table interaction closures on EVERY pass, each capturing
+        // the block as it is right now. A closure bound once at creation would
+        // keep handing out a stale range after any edit above the table.
+        for (_, entry) in entries {
+            guard let table = entry.view as? TableBlockView else { continue }
+            let current = entry.block
+            table.onEditCell = { [weak self, weak table] row, col, rect in
+                guard let table else { return }
+                self?.onEditTableCell?(current, row, col, rect, table)
+            }
+            table.onCollapseToSource = { [weak self] in
+                self?.onCollapseBlockToSource?(current)
             }
         }
 
         // Hide views whose (current) range overlaps a cursor-active range.
         for (_, entry) in entries {
-            let active = cursorActiveRanges.contains { intersects($0, entry.block.range) }
+            // Must be the SAME predicate the highlighter uses to decide
+            // whether to conceal the block (SyntaxHighlighter, block loop).
+            // They used to differ by one character of fuzz, which left the
+            // overlay drawn on top of un-concealed source.
+            let active = cursorActiveRanges.contains { $0.touchesBlock(entry.block.range) }
             entry.view.isHidden = active
         }
 
@@ -211,6 +340,8 @@ final class BlockOverlayManager {
               let textContainer = textView.textContainer else { return }
 
         let storageLength = textView.textStorage?.length ?? 0
+        // Same width the heights were measured at — see `resolvedContentWidth()`.
+        guard let width = resolvedContentWidth() else { return }
         for (_, entry) in entries {
             let r = entry.block.range
             guard r.location + r.length <= storageLength else {
@@ -224,11 +355,12 @@ final class BlockOverlayManager {
             }
             let bounding = layoutManager.boundingRect(forGlyphRange: glyphRange, in: textContainer)
             let inset = textView.textContainerInset
+            let pad = EditorLayout.blockOverlayHeightPadding
             let frame = NSRect(
                 x: bounding.minX + inset.width,
-                y: bounding.minY + inset.height + 2,
-                width: max(EditorLayout.blockOverlayMinWidth, bounding.width - 4),
-                height: max(40, bounding.height - 6)
+                y: bounding.minY + inset.height + pad / 2,
+                width: width,
+                height: max(40, bounding.height - pad)
             )
             entry.view.frame = frame
         }
@@ -342,16 +474,30 @@ final class BlockOverlayManager {
         }
     }
 
-    private func intersects(_ a: NSRange, _ b: NSRange) -> Bool {
-        let aEnd = a.location + a.length
-        let bEnd = b.location + b.length
-        return a.location <= bEnd && b.location <= aEnd
-    }
-
     /// Called when an async-loading block (math/mermaid) reports a new
     /// height after rendering. We need to ask the highlighter to reserve
     /// more line-height so the overlay isn't clipped.
     var heightChangeHandler: (() -> Void)?
+
+    /// A rendered table cell was clicked: (block, row, col, cell rect, view).
+    /// `row == -1` is the header band.
+    var onEditTableCell: ((ExtractedBlock, Int, Int, NSRect, TableBlockView) -> Void)?
+    /// The user asked to edit a block as raw markdown (double-click on the
+    /// table chrome, or a block that no longer parses as a table).
+    var onCollapseBlockToSource: ((ExtractedBlock) -> Void)?
+
+    /// The overlay view currently rendering `block`, if any.
+    ///
+    /// Looked up by the block's position in the document, NOT by recomputing
+    /// an identity from the block alone: identities carry an ordinal counted
+    /// across the whole document, so deriving one from a single-element array
+    /// always yields ordinal 0 and would hand back the first table in the
+    /// file no matter which one was asked for.
+    func view(for block: ExtractedBlock) -> BlockAttachmentView? {
+        entries.values.first {
+            $0.block.kind == block.kind && $0.block.range.location == block.range.location
+        }?.view
+    }
 
     private func notifyHeightChange() {
         heightChangeHandler?()
@@ -362,11 +508,17 @@ final class BlockOverlayManager {
     /// Test-only: number of pooled overlay views.
     var pooledViewCountForTesting: Int { entries.count }
 
+    /// Test-only: the single width used for BOTH measuring and drawing.
+    /// Exposed so a test can assert the two never diverge again.
+    var contentWidthForTesting: CGFloat { resolvedContentWidth() ?? 0 }
+
+    /// Test-only: number of entries currently held in the height cache.
+    var probeCacheCountForTesting: Int { probeHeightCache.count }
+
     /// Test-only: the overlay view currently rendering the given block's
     /// content identity, or nil. Lets tests assert view reuse vs.
     /// recreation across edits.
     func pooledViewForTesting(matching block: ExtractedBlock) -> BlockAttachmentView? {
-        let id = identities(for: [block]).first
-        return id.flatMap { entries[$0]?.view }
+        view(for: block)
     }
 }

@@ -21,7 +21,7 @@ final class FrontmatterTests: XCTestCase {
         ---
         title: My document
         date: 2026-04-01
-        author: "Wittmann, Michael"
+        author: "Doe, Jane"
         slug: 'hello-world'
         ---
         Body.
@@ -30,7 +30,7 @@ final class FrontmatterTests: XCTestCase {
         XCTAssertNotNil(fm.range)
         XCTAssertEqual(fm.title, "My document")
         XCTAssertEqual(fm.date, "2026-04-01")
-        XCTAssertEqual(fm.scalars["author"], "Wittmann, Michael")
+        XCTAssertEqual(fm.scalars["author"], "Doe, Jane")
         XCTAssertEqual(fm.scalars["slug"], "hello-world")
     }
 
@@ -115,24 +115,16 @@ final class FrontmatterTests: XCTestCase {
         XCTAssertTrue(fm.arrays.isEmpty, "arrays should be empty when frontmatter is malformed")
     }
 
-    /// BEHAVIOR-PINNING: The regex pattern is `\A---\n` (LF-only). On Windows
-    /// or iCloud Drive round-trips the file may arrive with CRLF line endings.
-    /// The `\n` in the pattern does NOT match the `\r\n` sequence, so the regex
-    /// fails to match entirely and returns .empty.
-    ///
-    /// This test documents the CURRENT behavior. It is intentionally a pinning
-    /// test — if CRLF support is added in the future this test will need to be
-    /// updated to reflect the new expected behavior.
-    func testCRLFFrontmatterIsNotParsed() {
-        // Source uses CRLF throughout (Windows / iCloud Drive worst-case).
+    /// CRLF files (Windows, some sync tools) are front matter too. The
+    /// old LF-only rule missed them, and the inspector would then have
+    /// put a second block on top of the existing one.
+    func testCRLFFrontmatterIsParsed() {
         let src = "---\r\ntitle: Foo\r\ntags: [swift, macos]\r\n---\r\nbody"
         let fm = Frontmatter.build(from: src)
-        // CURRENT BEHAVIOR: CRLF breaks the LF-anchored regex → .empty.
-        // NOTE: This is a known iCloud/Windows pitfall. If the parser is ever
-        // updated to normalise line endings before matching, change the
-        // assertions below to XCTAssertNotNil(fm.range) / XCTAssertEqual(fm.title, "Foo").
-        XCTAssertNil(fm.range, "CRLF line endings are not supported by the current LF-only regex (behavior-pinning)")
-        XCTAssertNil(fm.title, "title should be absent when CRLF prevents the regex from matching")
+        XCTAssertEqual(fm.range, NSRange(location: 0, length: (src as NSString).length - 4))
+        XCTAssertTrue(fm.usesCRLF)
+        XCTAssertEqual(fm.title, "Foo", "no trailing \\r in the value")
+        XCTAssertEqual(fm.tags, ["swift", "macos"])
     }
 
     /// A tab-separated key/value (`title:\tFoo`) — `splitKeyValue` splits on
@@ -152,12 +144,12 @@ final class FrontmatterTests: XCTestCase {
     /// test (`testEmptyFrontmatterBlockIsHandled`) that was written against the
     /// same source. This test adds a complementary assertion that the `title`
     /// and `tags` convenience accessors also return their zero-values, and that
-    /// `rawLines` contains exactly one empty string (the body captured by the
-    /// regex is `""`, split by `\n` gives `[""]`).
+    /// there are no body lines.
     func testEmptyFrontmatterBlockScalarsAndTags() {
         let src = "---\n---\nbody"
         let fm = Frontmatter.build(from: src)
         XCTAssertNotNil(fm.range, "An empty frontmatter block should still produce a valid range")
+        XCTAssertEqual(fm.rawLines, [])
         XCTAssertTrue(fm.scalars.isEmpty, "Empty frontmatter block should have no scalars")
         XCTAssertTrue(fm.arrays.isEmpty, "Empty frontmatter block should have no arrays")
         XCTAssertNil(fm.title, "title should be nil for an empty frontmatter block")

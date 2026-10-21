@@ -4,8 +4,9 @@ import AppKit
 ///
 /// Loaded once at app start from
 /// `~/Library/Application Support/PicaMD/keybindings.json`. Falls
-/// back to the built-in defaults if the file is missing, malformed,
-/// or specifies a key combo that conflicts with a system shortcut.
+/// back to the built-in default for every entry that is missing or
+/// malformed. The Format menu and the command palette show the same
+/// combos, so a rebinding moves the menu shortcut too.
 ///
 /// JSON shape:
 ///
@@ -15,7 +16,8 @@ import AppKit
 ///       …
 ///       "moveLineUp": "cmd+option+up",
 ///       "duplicateLine": "cmd+shift+d",
-///       "selectLine": "cmd+l"
+///       "selectLine": "cmd+l",
+///       "strikethrough": "cmd+shift+x"
 ///     }
 ///
 /// Modifier names: `cmd`, `shift`, `option`, `ctrl` (any order, joined
@@ -36,6 +38,69 @@ enum KeybindingAction: String, CaseIterable, Codable {
     case moveLineDown = "moveLineDown"
     case duplicateLine = "duplicateLine"
     case selectLine = "selectLine"
+    case bold = "bold"                           // ⌘B
+    case italic = "italic"                       // ⌘I
+    case strikethrough = "strikethrough"         // no default combo
+    case inlineCode = "inlineCode"               // no default combo
+    case link = "link"                           // ⌘K
+    case checklist = "checklist"                 // no default combo
+    case quote = "quote"                         // no default combo
+    case table = "table"                         // no default combo
+
+    /// Title in the Format menu and the command palette.
+    var title: String {
+        switch self {
+        case .headingParagraph: return "Body"
+        case .headingH1: return "Heading 1"
+        case .headingH2: return "Heading 2"
+        case .headingH3: return "Heading 3"
+        case .headingH4: return "Heading 4"
+        case .headingH5: return "Heading 5"
+        case .headingH6: return "Heading 6"
+        case .moveLineUp: return "Move Line Up"
+        case .moveLineDown: return "Move Line Down"
+        case .duplicateLine: return "Duplicate Line"
+        case .selectLine: return "Select Line"
+        case .bold: return "Bold"
+        case .italic: return "Italic"
+        case .strikethrough: return "Strikethrough"
+        case .inlineCode: return "Inline Code"
+        case .link: return "Link…"
+        case .checklist: return "Checklist"
+        case .quote: return "Quote"
+        case .table: return "Table"
+        }
+    }
+
+    /// Edit ▸ Undo <name>. Nil for Select Line, which changes no text.
+    var undoActionName: String? {
+        switch self {
+        case .selectLine: return nil
+        case .link: return "Link"
+        case .table: return "Insert Table"
+        default: return title
+        }
+    }
+
+    /// Symbol in the command palette.
+    var symbolName: String {
+        switch self {
+        case .headingParagraph: return "text.alignleft"
+        case .headingH1, .headingH2, .headingH3, .headingH4, .headingH5, .headingH6: return "number"
+        case .moveLineUp: return "arrow.up"
+        case .moveLineDown: return "arrow.down"
+        case .duplicateLine: return "plus.square.on.square"
+        case .selectLine: return "selection.pin.in.out"
+        case .bold: return "bold"
+        case .italic: return "italic"
+        case .strikethrough: return "strikethrough"
+        case .inlineCode: return "chevron.left.forwardslash.chevron.right"
+        case .link: return "link"
+        case .checklist: return "checklist"
+        case .quote: return "text.quote"
+        case .table: return "tablecells"
+        }
+    }
 }
 
 struct KeyCombo: Equatable {
@@ -73,12 +138,42 @@ struct KeyCombo: Equatable {
         return KeyCombo(key: last, modifiers: mods)
     }
 
+    /// The combo as a menu shows it: modifiers in Apple's order
+    /// (⌃⌥⇧⌘), then the key (`⌥⌘↑`, `⇧⌘D`).
+    var displayString: String {
+        var out = ""
+        if modifiers.contains(.control) { out += "⌃" }
+        if modifiers.contains(.option) { out += "⌥" }
+        if modifiers.contains(.shift) { out += "⇧" }
+        if modifiers.contains(.command) { out += "⌘" }
+        switch key {
+        case "up": out += "↑"
+        case "down": out += "↓"
+        case "left": out += "←"
+        case "right": out += "→"
+        case "escape": out += "⎋"
+        case "return": out += "↩"
+        case "tab": out += "⇥"
+        case "space": out += "Space"
+        default: out += key.uppercased()
+        }
+        return out
+    }
+
+    /// The modifier keys shortcuts are built from.
+    static let relevantModifiers: NSEvent.ModifierFlags = [.command, .option, .control, .shift]
+
     /// Match the combo against an `NSEvent`. Modifiers must match
     /// exactly (so `cmd+1` doesn't fire when the user holds
     /// `cmd+shift+1`).
     func matches(_ event: NSEvent) -> Bool {
-        let eventMods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
-        let wantedMods = modifiers.intersection(.deviceIndependentFlagsMask)
+        // Compare only the modifiers a shortcut can be made of. The
+        // device-independent mask also keeps Caps Lock, and arrow keys
+        // always carry `.numericPad` + `.function` — with those included,
+        // ⌘⌥↑/↓ (move line) could never match and Caps Lock disabled
+        // every editor shortcut.
+        let eventMods = event.modifierFlags.intersection(Self.relevantModifiers)
+        let wantedMods = modifiers.intersection(Self.relevantModifiers)
         guard eventMods == wantedMods else { return false }
 
         // Named keys: arrow / escape / return / tab / space — match by keyCode.
@@ -117,6 +212,9 @@ struct KeybindingMap: Equatable {
             .moveLineDown:     KeyCombo(key: "down", modifiers: [.command, .option]),
             .duplicateLine:    KeyCombo(key: "d",   modifiers: [.command, .shift]),
             .selectLine:       KeyCombo(key: "l",   modifiers: .command),
+            .bold:             KeyCombo(key: "b",   modifiers: .command),
+            .italic:           KeyCombo(key: "i",   modifiers: .command),
+            .link:             KeyCombo(key: "k",   modifiers: .command),
         ])
     }()
 
@@ -124,12 +222,18 @@ struct KeybindingMap: Equatable {
         self.table = table
     }
 
-    /// Look up which action (if any) matches the given event.
+    /// The combo bound to `action`, nil when it has none (Strikethrough,
+    /// Inline Code, Checklist, Quote and Table start unbound).
+    func combo(for action: KeybindingAction) -> KeyCombo? {
+        table[action]
+    }
+
+    /// Look up which action (if any) matches the given event. Walks the
+    /// actions in declaration order: with two actions on one combo in
+    /// keybindings.json, the same one wins on every launch (a dictionary's
+    /// order changes with the per-process hash seed).
     func action(for event: NSEvent) -> KeybindingAction? {
-        for (action, combo) in table where combo.matches(event) {
-            return action
-        }
-        return nil
+        KeybindingAction.allCases.first { table[$0]?.matches(event) == true }
     }
 
     /// Build a map by overlaying user JSON onto the defaults — any
@@ -152,15 +256,11 @@ struct KeybindingMap: Equatable {
 // MARK: - File loader
 
 enum KeybindingLoader {
-    /// `~/Library/Application Support/PicaMD/keybindings.json`
-    static let configURL: URL? = {
-        guard let support = FileManager.default
-            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-        else { return nil }
-        return support
-            .appendingPathComponent("PicaMD", isDirectory: true)
-            .appendingPathComponent("keybindings.json")
-    }()
+    /// `~/Library/Application Support/PicaMD/keybindings.json`; in the
+    /// test host a file that doesn't exist, so tests see the default
+    /// bindings whatever the user has customised.
+    static let configURL: URL? = AppEnvironment.applicationSupportDirectory
+        .appendingPathComponent("keybindings.json")
 
     /// Read the JSON file (if present and well-formed) and return a
     /// merged `KeybindingMap`. Logs and falls back to defaults on any

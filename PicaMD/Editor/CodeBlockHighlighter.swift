@@ -37,7 +37,6 @@ struct CodeBlockHighlighter {
             // Body of the code block: everything between the opening
             // fence line and the closing fence line.
             let bodyStart = NSMaxRange(firstLineRange)
-            let bodyLength = (block.location + block.length) - bodyStart
             // Subtract the closing fence line.
             let beforeCloseRange = NSRange(location: block.location, length: block.length - 1)
             let closingLineRange = nsString.lineRange(
@@ -47,13 +46,32 @@ struct CodeBlockHighlighter {
             )
             let bodyEnd = closingLineRange.location
             guard bodyEnd > bodyStart else { continue }
-            let bodyRange = NSRange(location: bodyStart, length: bodyEnd - bodyStart)
+            var bodyRange = NSRange(location: bodyStart, length: bodyEnd - bodyStart)
+            // Only tokenize the part of a long block that's in the working
+            // slice (line-aligned), not all 5,000 lines on every keystroke.
+            if let vp = viewportRange {
+                bodyRange = NSIntersectionRange(bodyRange, nsString.lineRange(for: vp))
+                guard bodyRange.length > 0 else { continue }
+            }
             let body = nsString.substring(with: bodyRange)
 
-            // Apply each token type's regex.
-            for rule in tokenizer.rules {
-                rule.regex.enumerateMatches(in: body, options: [], range: NSRange(location: 0, length: (body as NSString).length)) { match, _, _ in
-                    guard let m = match else { return }
+            // Comments and strings claim their span: later rules (keywords,
+            // types, numbers) must not repaint inside them — `// return if
+            // true` stays comment-grey. Which of the two wins is decided by
+            // position, not by rule order: `"https://x"` is a string, and the
+            // apostrophe in `# it's` does not open one.
+            let bodyLength = (body as NSString).length
+            let claimed = claimedSpans(in: body, rules: tokenizer.rules)
+            for (span, token) in claimed {
+                guard let color = palette.color(for: token) else { continue }
+                textStorage.addAttribute(.foregroundColor, value: color,
+                                         range: NSRange(location: bodyRange.location + span.location,
+                                                        length: span.length))
+            }
+            for rule in tokenizer.rules where rule.token != .comment && rule.token != .string {
+                rule.regex.enumerateMatches(in: body, options: [], range: NSRange(location: 0, length: bodyLength)) { match, _, _ in
+                    guard let m = match, m.range.length > 0 else { return }
+                    if claimed.contains(where: { NSIntersectionRange($0.span, m.range).length > 0 }) { return }
                     let absoluteRange = NSRange(location: bodyRange.location + m.range.location,
                                                 length: m.range.length)
                     if let color = palette.color(for: rule.token) {
@@ -62,6 +80,55 @@ struct CodeBlockHighlighter {
                 }
             }
         }
+    }
+
+    /// Comment and string spans of `body`, found in one left-to-right scan:
+    /// at each point the match that starts first wins (rule order breaks a
+    /// tie), and the scan resumes behind it. Running the rules one after the
+    /// other instead let the first rule claim a span that starts inside an
+    /// earlier token — `//example.com"` out of a URL string, `'s Bob'` out of
+    /// a comment — and the real token was dropped.
+    static func claimedSpans(in body: String, rules: [Rule]) -> [(span: NSRange, token: Token)] {
+        let claiming = rules.filter { $0.token == .comment || $0.token == .string }
+        guard !claiming.isEmpty else { return [] }
+        let length = (body as NSString).length
+        // Next match of each rule at or after the scan position; refreshed
+        // only once the position passes its start, so the scan stays linear.
+        var next: [NSRange?] = Array(repeating: nil, count: claiming.count)
+        var stale = Array(repeating: true, count: claiming.count)
+        var out: [(span: NSRange, token: Token)] = []
+        var position = 0
+        while position < length {
+            var best: (index: Int, span: NSRange)?
+            for i in claiming.indices {
+                if stale[i] || (next[i].map { $0.location < position } ?? false) {
+                    next[i] = firstMatch(of: claiming[i].regex, in: body, from: position, length: length)
+                    stale[i] = false
+                }
+                guard let candidate = next[i] else { continue }
+                if best.map({ candidate.location < $0.span.location }) ?? true {
+                    best = (i, candidate)
+                }
+            }
+            guard let winner = best else { break }
+            out.append((winner.span, claiming[winner.index].token))
+            position = NSMaxRange(winner.span)
+        }
+        return out
+    }
+
+    private static func firstMatch(of regex: NSRegularExpression, in body: String,
+                                   from position: Int, length: Int) -> NSRange? {
+        var from = position
+        while from < length {
+            guard let m = regex.firstMatch(in: body, options: [],
+                                           range: NSRange(location: from, length: length - from)) else {
+                return nil
+            }
+            if m.range.length > 0 { return m.range }
+            from = m.range.location + 1      // skip an empty match
+        }
+        return nil
     }
 
     // MARK: - Token model
@@ -133,8 +200,19 @@ struct CodeBlockHighlighter {
         // Strip leading backticks/tildes
         var s = fenceLine
         while let first = s.first, first == "`" || first == "~" { s.removeFirst() }
-        return s.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)?.lowercased() ?? ""
+        let lang = s.split(whereSeparator: { $0.isWhitespace }).first.map(String.init)?.lowercased() ?? ""
+        return languageAliases[lang] ?? lang
     }
+
+    /// Common short names for the languages above.
+    private static let languageAliases: [String: String] = [
+        "js": "javascript", "jsx": "javascript", "mjs": "javascript", "node": "javascript",
+        "ts": "typescript", "tsx": "typescript",
+        "py": "python", "python3": "python",
+        "sh": "bash", "zsh": "bash", "shell": "bash", "console": "bash",
+        "yml": "yaml", "rs": "rust", "golang": "go",
+        "htm": "html", "xml": "html", "jsonc": "json",
+    ]
 
     private static func compile(_ pattern: String, options: NSRegularExpression.Options = []) -> NSRegularExpression {
         try! NSRegularExpression(pattern: pattern, options: options)

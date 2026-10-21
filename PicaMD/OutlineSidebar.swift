@@ -2,118 +2,89 @@ import SwiftUI
 
 /// SwiftUI sidebar showing the document's heading hierarchy. Click on
 /// a heading to jump the editor's cursor and scroll position there.
+///
+/// It sits on the system sidebar material, so its text uses the system
+/// label colours, which follow Settings ▸ Appearance (the window chrome),
+/// not the editor palette. The active row is tinted with the theme
+/// accent (decision C4: accent in selection lists).
 struct OutlineSidebar: View {
-    @EnvironmentObject private var themeStore: ThemeStore
     let headings: [DocumentHeading]
     let activeHeadingID: Int?
+    let accent: Color
     let onSelect: (DocumentHeading) -> Void
 
+    /// Leading text inset of a row: 10, 24, 38 … for H1, H2, H3 (board
+    /// `Main`). It comes on top of the row's own 10 pt margin.
+    static func indent(forLevel level: Int) -> CGFloat {
+        10 + CGFloat(max(level, 1) - 1) * 14
+    }
+
+    /// Opacity of the accent behind the active row: enough to read as
+    /// "selected" without competing with the editor's caret and links.
+    static let activeRowOpacity: Double = 0.16
+
     var body: some View {
-        Group {
-            if headings.isEmpty {
-                emptyState
-            } else {
-                List {
-                    Section(header: header) {
-                        ForEach(headings) { h in
-                            row(for: h)
-                                .listRowInsets(EdgeInsets(top: 2, leading: 4, bottom: 2, trailing: 4))
-                                .listRowBackground(Color.clear)
-                        }
+        if headings.isEmpty {
+            emptyState
+        } else {
+            List {
+                Section {
+                    ForEach(headings) { h in
+                        row(for: h)
+                            .listRowInsets(EdgeInsets(top: 1, leading: 0, bottom: 1, trailing: 0))
+                            .listRowSeparator(.hidden)
                     }
+                } header: {
+                    Text("Outline")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(nil)
                 }
-                .listStyle(.sidebar)
-                .scrollContentBackground(.hidden)
             }
+            .listStyle(.sidebar)
         }
-        // Outline shares the editor's background so the surface looks
-        // continuous — no jarring chrome strip on the left.
-        .background(Color(themeStore.theme.palette.bg))
     }
 
     // MARK: - Pieces
 
-    private var header: some View {
-        // Same reason as `row(for:)` — `.primary` / `.tertiary` follow the
-        // macOS system appearance, but the user's palette is independent.
-        let paletteFg = Color(themeStore.theme.palette.fg)
-        return HStack {
-            Image(systemName: "list.bullet.indent")
-                .font(.system(size: 11))
-                .foregroundStyle(paletteFg.opacity(0.65))
-            Text("Outline")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(paletteFg.opacity(0.7))
-                .textCase(.uppercase)
-            Spacer()
-            Text("\(headings.count)")
-                .font(.system(size: 10))
-                .foregroundStyle(paletteFg.opacity(0.45))
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 4)
-    }
-
     private var emptyState: some View {
-        let paletteFg = Color(themeStore.theme.palette.fg)
-        return VStack(spacing: 8) {
-            Image(systemName: "list.bullet.indent")
-                .font(.system(size: 22, weight: .light))
-                .foregroundStyle(paletteFg.opacity(0.45))
+        VStack(spacing: 6) {
             Text("No headings yet")
                 .font(.system(size: 12))
-                .foregroundStyle(paletteFg.opacity(0.65))
+                .foregroundStyle(.secondary)
             Text("Type # then a space to add one.")
                 .font(.system(size: 11))
-                .foregroundStyle(paletteFg.opacity(0.45))
+                .foregroundStyle(.tertiary)
                 .multilineTextAlignment(.center)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding()
     }
 
-    @ViewBuilder
     private func row(for h: DocumentHeading) -> some View {
         let isActive = h.id == activeHeadingID
-        // Using `.primary` here resolves to the macOS *system* appearance
-        // (Light Mode → black, Dark Mode → white) — but the user's chosen
-        // palette is independent. Pick White palette while macOS is in
-        // Dark mode, and `.primary` would give white-on-white. Read the
-        // foreground colour from the palette instead so the outline always
-        // matches the editor canvas.
-        let paletteFg = Color(themeStore.theme.palette.fg)
-        Button {
+        return Button {
             onSelect(h)
         } label: {
-            HStack(spacing: 6) {
-                indent(for: h.level)
-                Text(h.text)
-                    .font(font(for: h.level))
-                    .foregroundStyle(isActive ? Color.accentColor : paletteFg)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
-            }
-            .padding(.vertical, 2)
-            .padding(.horizontal, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 4)
-                    .fill(isActive ? Color.accentColor.opacity(0.15) : Color.clear)
-            )
-            .contentShape(Rectangle())
+            Text(h.text)
+                .font(.system(size: 13, weight: (isActive || h.level == 1) ? .semibold : .regular))
+                .foregroundStyle(.primary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .padding(.leading, Self.indent(forLevel: h.level))
+                .padding(.trailing, 10)
+                .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+                .background(
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .fill(isActive ? accent.opacity(Self.activeRowOpacity) : .clear)
+                )
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-
-    private func indent(for level: Int) -> some View {
-        Color.clear.frame(width: CGFloat(level - 1) * 12)
-    }
-
-    private func font(for level: Int) -> Font {
-        switch level {
-        case 1: return .system(size: 13, weight: .semibold)
-        case 2: return .system(size: 12, weight: .medium)
-        default: return .system(size: 11, weight: .regular)
-        }
+        // The rows are buttons, not list selection (the system highlight
+        // would paint over the accent tint), so VoiceOver learns which
+        // heading holds the caret from the trait instead.
+        .accessibilityAddTraits(isActive ? .isSelected : [])
+        .accessibilityLabel("Heading \(h.level), \(h.text)")
     }
 }

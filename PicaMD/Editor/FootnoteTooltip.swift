@@ -11,7 +11,7 @@ import AppKit
 final class FootnoteTooltipController {
     private weak var textView: NSTextView?
     private let popover = NSPopover()
-    private var index: FootnoteIndex = .empty
+    private(set) var index: FootnoteIndex = .empty
     private var trackingArea: NSTrackingArea?
     private var currentRef: FootnoteRef?
 
