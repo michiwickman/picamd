@@ -43,7 +43,7 @@ final class UpdaterController: ObservableObject {
 
         if configured {
             let ctrl = SPUStandardUpdaterController(
-                startingUpdater: true,
+                startingUpdater: Self.startsUpdater,
                 updaterDelegate: nil,
                 userDriverDelegate: nil
             )
@@ -53,6 +53,24 @@ final class UpdaterController: ObservableObject {
         } else {
             self.updater = nil
             self.canCheckForUpdates = false
+        }
+    }
+
+    /// Off in the test host: Sparkle would check the network for updates
+    /// in the middle of a test run. The updater still exists there, so
+    /// Settings shows what the app shows.
+    static let startsUpdater = !AppEnvironment.isolatesUserData
+
+    /// Settings ▸ General ▸ "Check for updates automatically". Sparkle
+    /// persists the value in the app's own user defaults, so there is no
+    /// PicaMD key for it. Off (and the switch disabled) while the updater
+    /// isn't configured.
+    var automaticallyChecksForUpdates: Bool {
+        get { updater?.updater.automaticallyChecksForUpdates ?? false }
+        set {
+            guard let updater else { return }
+            objectWillChange.send()
+            updater.updater.automaticallyChecksForUpdates = newValue
         }
     }
 }

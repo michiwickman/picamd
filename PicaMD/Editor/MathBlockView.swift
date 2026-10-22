@@ -94,7 +94,7 @@ final class MathBlockView: WebViewBlockView {
 
         // Stage the per-block HTML alongside the KaTeX assets so
         // loadFileURL's allowingReadAccessTo covers everything.
-        let htmlURL = cacheDir.appendingPathComponent("math-\(block.range.location).html")
+        let htmlURL = cacheDir.appendingPathComponent("math-\(stagingID).html")
         do {
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
             stagedFileURL = htmlURL   // so WebViewBlockView.deinit can delete it

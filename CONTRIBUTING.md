@@ -4,26 +4,27 @@ Thanks for being interested in helping. Some quick orientation:
 
 ## What's most useful right now
 
-PicaMD is in **public-alpha**. The two highest-impact things you
-can contribute:
+PicaMD is a small project with one maintainer. The two most useful
+contributions:
 
 1. **Bug reports.** Open an issue with:
-   - macOS version + Apple silicon vs Intel
+   - macOS version and Mac model
    - PicaMD version (`About PicaMD` in the menu)
    - Reproducible steps
    - A screenshot or `.md` snippet that triggers it
-2. **Feedback on the AI presets and MCP tools.** They're the
-   alpha's two riskiest surfaces — opinions on the default preset
-   set, the prompt templates, the MCP tool surface, all welcome.
+2. **Feedback on the AI presets and MCP tools.** Opinions on the
+   default presets, the prompt templates and the MCP tool surface are
+   welcome.
 
 Less useful (we're not looking for it yet):
-- New features. The Phase 1-12 roadmap (see `PHASES.md`) is the
-  scope for v1.0; new feature PRs will likely sit. Open an issue
-  to discuss first.
+- New features. PicaMD is meant to stay a small editor and viewer;
+  feature PRs will likely sit. Open an issue to discuss first.
 - Refactors that don't fix a bug or simplify code
 - Style-only PRs (we follow Swift's standard formatting)
 
 ## Building
+
+You need macOS 27 and Xcode 27 or later.
 
 ```bash
 brew install xcodegen
@@ -33,9 +34,8 @@ cd picamd
 xcodegen generate    # if just opening in Xcode
 ```
 
-To run the unit suite (184 tests at the time of writing — 162 in
-the main bundle + 22 in the MCP-sidecar bundle), invoke each
-bundle separately. `xcodebuild test` against the scheme will
+To run the unit suite (the main bundle plus the MCP-sidecar
+bundle), invoke each bundle separately. `xcodebuild test` against the scheme will
 eventually run both, but it serialises them with a long delay
 between (~30 min in observed runs); two separate invocations
 finish in seconds:
@@ -63,19 +63,35 @@ CI does both. Tests must pass before you push.
   things apart only when reuse demands it.
 - Comments answer **why**, not what. Mechanical paraphrase of code
   is noise.
-- No third-party Swift packages without strong justification (the
-  bundle weight budget is 12 MB; `swift-markdown` and `Sparkle`
-  are the only deps right now).
+- No third-party Swift packages without strong justification (CI
+  fails a Release bundle above `BUNDLE_SIZE_LIMIT_MB` in
+  `.github/workflows/ci.yml`; `swift-markdown` and `Sparkle` are the
+  only deps right now).
 
 ## Project structure
 
-See `README.md` → "Repository layout".
+```
+project.yml          xcodegen spec (generates PicaMD.xcodeproj)
+build.sh             local Release build, INSTALL=0 skips /Applications
+release.sh           Release build, sign, zip into dist/
+PicaMD/              the app: SwiftUI shell, menus, settings, welcome
+PicaMD/Editor/       the text view, highlighter, overlays, AI, themes
+PicaMD/Search/       find bar and search
+PicaMD/Settings/     the Settings panes
+PicaMDQuickLook/     Quick Look preview extension
+PicaMDMCP/           MCP sidecar (`picamd-mcp`) for Claude Code
+PicaMDTests/         app unit tests (hosted in PicaMD.app)
+PicaMDMCPTests/      sidecar unit tests
+samples/             Welcome.md and test documents
+design/icon/         app icon source and generator (see its README)
+.github/             CI, release workflow, issue templates
+```
 
 ## Sending a PR
 
 1. Fork → branch → commit → push → open PR against `main`.
 2. CI runs build + unit tests + bundle-size guard. Green required.
-3. Tag a maintainer (currently just one) for review.
+3. Ask for a review in the PR.
 
 ## License
 

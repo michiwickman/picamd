@@ -19,6 +19,9 @@ enum MathRenderingBundle {
     /// falling back to a reboot-purged temp dir that forces re-staging
     /// KaTeX every launch.
     static let cacheDir: URL = {
+        if let isolated = AppEnvironment.isolatedCachesDirectory {
+            return isolated.appendingPathComponent("Math", isDirectory: true)
+        }
         do {
             let base = try FileManager.default.url(
                 for: .cachesDirectory,

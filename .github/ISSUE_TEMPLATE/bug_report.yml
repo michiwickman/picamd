@@ -1,6 +1,6 @@
 name: Bug report
 description: Something isn't working the way it should
-labels: [bug, alpha-feedback]
+labels: [bug]
 body:
   - type: textarea
     id: what-happened
@@ -30,26 +30,24 @@ body:
     id: macos
     attributes:
       label: macOS version
-      placeholder: "14.5 / 15.0 / …"
+      placeholder: "27.0 / 27.1 / …"
     validations:
       required: true
 
-  - type: dropdown
-    id: arch
+  - type: input
+    id: mac
     attributes:
-      label: Mac
-      options:
-        - Apple silicon (M1/M2/M3/M4)
-        - Intel
+      label: Mac model
+      placeholder: "MacBook Air M3"
     validations:
-      required: true
+      required: false
 
   - type: input
     id: picamd-version
     attributes:
       label: PicaMD version
       description: From the `About PicaMD` menu item.
-      placeholder: "0.8.0-alpha"
+      placeholder: "0.10.0"
     validations:
       required: true
 

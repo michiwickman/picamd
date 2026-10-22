@@ -9,7 +9,14 @@ import AppKit
 ///   `MathBlockView`    — `$$…$$` via KaTeX in a WKWebView
 ///   `MermaidBlockView` — ` ```mermaid…``` ` via mermaid.js in a WKWebView
 class BlockAttachmentView: NSView {
-    let block: ExtractedBlock
+    /// Mutable so a pooled view can adopt new content without being rebuilt.
+    /// Tables are pooled by document position rather than by payload, so
+    /// committing a cell edit refreshes the existing view instead of tearing
+    /// it down — otherwise the open cell editor would be destroyed mid-edit
+    /// and Tab-chaining would lose its target.
+    var block: ExtractedBlock {
+        didSet { contentDidChange() }
+    }
     var documentURL: URL?
 
     init(block: ExtractedBlock, documentURL: URL?) {
@@ -41,6 +48,13 @@ class BlockAttachmentView: NSView {
     /// Subclasses implement layout/content here.
     func setupContent() {}
 
+    /// The pooled view has adopted a new `block` with different content.
+    /// Plain AppKit subclasses just repaint; WebView-backed ones override this
+    /// to reload their HTML.
+    func contentDidChange() {
+        needsDisplay = true
+    }
+
     /// Subclasses report a desired height for the given proposed width.
     func desiredHeight(for width: CGFloat) -> CGFloat { 60 }
 
@@ -70,6 +84,12 @@ class BlockAttachmentView: NSView {
     /// initialised yet (shouldn't happen — `ThemeStore` is created at
     /// app startup before any block views — but stays defensive).
     var isDark: Bool {
-        ThemeStore.currentPalette.isDark
+        palette.isDark
+    }
+
+    /// The editor palette the overlay paints against. Read live so a theme
+    /// change picked up by `appearanceChanged()` sees the new colours.
+    var palette: Palette {
+        ThemeStore.currentPalette
     }
 }

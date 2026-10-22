@@ -4,8 +4,8 @@
 #
 #   1. **Ad-hoc signed (default)** — what you get without an Apple
 #      Developer Program subscription. Build, ad-hoc-sign, zip.
-#      Users will see Gatekeeper's "can't be opened" dialog on first
-#      launch and need to right-click → Open. README explains.
+#      Users will see Gatekeeper's warning on first launch and need
+#      System Settings ▸ Privacy & Security ▸ Open Anyway. README explains.
 #
 #   2. **Notarized** — when `NOTARIZE_API_KEY_ID` and
 #      `NOTARIZE_API_KEY_PATH` and `NOTARIZE_TEAM_ID` are set in the
@@ -18,10 +18,10 @@
 #
 # Usage:
 #   ./release.sh                 # builds version from project.yml
-#   ./release.sh 0.8.0           # bumps project.yml to 0.8.0 first
+#   ./release.sh 0.10.0          # bumps project.yml to 0.10.0 first
 #   NOTARIZE_API_KEY_ID=… ./release.sh 1.0.0   # full notarized release
 #
-# Output: ./dist/PicaMD-<version>.zip + ./dist/PicaMD-<version>.zip.sig
+# Output: ./dist/PicaMD-<version>.zip (sign it for appcast.xml with Sparkle's sign_update)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -38,10 +38,29 @@ fi
 
 VERSION="$(awk -F'"' '/MARKETING_VERSION:/ {print $2; exit}' project.yml)"
 [ -n "$VERSION" ] || { echo "Could not read MARKETING_VERSION from project.yml"; exit 1; }
-echo "==> Building PicaMD $VERSION"
+
+# Sparkle compares the appcast's <sparkle:version> with CFBundleVersion,
+# which used to stay "1" forever — so an update was never "newer". Use
+# a monotonic build number (commit count) and put the SAME number into
+# <sparkle:version> for this release.
+BUILD_NUMBER="$(git rev-list --count HEAD 2>/dev/null || echo 1)"
+/usr/bin/sed -i '' "s/CURRENT_PROJECT_VERSION: \".*\"/CURRENT_PROJECT_VERSION: \"$BUILD_NUMBER\"/" project.yml
+echo "==> Building PicaMD $VERSION (build $BUILD_NUMBER)"
 
 mkdir -p dist
-rm -rf dist/PicaMD-*
+# Never delete outright: stale artefacts from an earlier run go to the
+# Trash so a local release can be undone from the Finder. A CI checkout
+# starts with an empty dist/, so this branch never runs there, which
+# matters because /usr/bin/trash on the runner image is not guaranteed.
+STALE=(dist/PicaMD-*)
+if [ -e "${STALE[0]}" ]; then
+    if [ -x /usr/bin/trash ]; then
+        /usr/bin/trash "${STALE[@]}"
+    else
+        echo "dist/ holds old artefacts and /usr/bin/trash is missing; clear dist/ first"
+        exit 1
+    fi
+fi
 
 # ------------------------------------------------------------- build
 
@@ -104,19 +123,27 @@ if [ "$NOTARIZE" = "1" ]; then
     echo "==> Stapling notarization ticket"
     /usr/bin/xcrun stapler staple "$BUILT_APP"
 
-    # Re-zip with the stapled ticket included.
-    rm -f "$DEST"
-    /usr/bin/ditto -c -k --keepParent "$BUILT_APP" "$DEST"
+    # Re-zip with the stapled ticket included. Zip beside the first
+    # archive and move it over, so nothing has to be deleted.
+    /usr/bin/ditto -c -k --keepParent "$BUILT_APP" "$DEST.stapled"
+    /bin/mv -f "$DEST.stapled" "$DEST"
 fi
 
 # ----------------------------------------------------------- output
 
 SIZE_MB=$(du -sh "$DEST" | awk '{print $1}')
 SHA=$(/usr/bin/shasum -a 256 "$DEST" | awk '{print $1}')
+# Sparkle offers an item to every macOS that passes its
+# minimumSystemVersion, so the appcast item must carry the same floor
+# the app enforces; otherwise older systems download a build that
+# cannot launch. Read it from the built bundle, not from project.yml.
+MIN_OS=$(/usr/bin/plutil -extract LSMinimumSystemVersion raw "$BUILT_APP/Contents/Info.plist")
 
 echo
 echo "============================================================"
 echo "PicaMD $VERSION packaged"
+echo "  Build:   $BUILD_NUMBER  (use as <sparkle:version> in appcast.xml)"
+echo "  Min OS:  $MIN_OS  (use as <sparkle:minimumSystemVersion> in appcast.xml)"
 echo "  File:    $DEST"
 echo "  Size:    $SIZE_MB"
 echo "  SHA-256: $SHA"
@@ -126,7 +153,7 @@ else
     echo "  Status:  Ad-hoc signed (Gatekeeper warning on first open)"
     echo
     echo "Tell users:"
-    echo "  1. Right-click PicaMD.app → Open → Open (in dialog)"
+    echo "  1. Open PicaMD once, then System Settings ▸ Privacy & Security ▸ Open Anyway"
     echo "  2. OR: xattr -dr com.apple.quarantine /Applications/PicaMD.app"
 fi
 echo "============================================================"

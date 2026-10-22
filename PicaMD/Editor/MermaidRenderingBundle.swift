@@ -35,6 +35,9 @@ enum MermaidRenderingBundle {
     // failure surfaces in the log instead of silently falling back to
     // a reboot-purged temp dir that forces a re-download every launch.
     static let cacheDir: URL = {
+        if let isolated = AppEnvironment.isolatedCachesDirectory {
+            return isolated.appendingPathComponent("Mermaid", isDirectory: true)
+        }
         do {
             let base = try FileManager.default.url(
                 for: .cachesDirectory,

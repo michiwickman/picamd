@@ -26,6 +26,11 @@ enum SpotlightIndexer {
     /// at once if the user wants to wipe PicaMD's metadata.
     static let domain = "de.michaelwittmann.PicaMD.documents"
 
+    /// Off in the test host: its items would land in the user's Spotlight
+    /// results (the index is per user, not per app), pointing at temporary
+    /// test files.
+    static let isEnabled = !AppEnvironment.isolatesUserData
+
     /// Index a freshly-opened or saved document.
     ///
     /// - Parameters:
@@ -38,6 +43,7 @@ enum SpotlightIndexer {
     ///     become the `contentDescription` shown in Spotlight's
     ///     preview row.
     static func index(url: URL, source: String) {
+        guard isEnabled else { return }
         let attrs = CSSearchableItemAttributeSet(contentType: .text)
 
         // Title — frontmatter wins, fall back to filename without ext.
@@ -79,6 +85,7 @@ enum SpotlightIndexer {
     /// for a file the system has already noticed is gone — but kept
     /// for future cleanup hooks.
     static func remove(url: URL) {
+        guard isEnabled else { return }
         CSSearchableIndex.default().deleteSearchableItems(
             withIdentifiers: [url.absoluteString]
         ) { error in
@@ -99,13 +106,26 @@ enum SpotlightIndexer {
         } else {
             body = source
         }
-        // Collapse all whitespace runs into single spaces.
-        let collapsed = body
-            .split(whereSeparator: { $0.isWhitespace })
-            .joined(separator: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        if collapsed.count <= 240 { return collapsed }
-        let prefix = collapsed.prefix(240)
-        return String(prefix) + "…"
+        // Collapse whitespace runs into single spaces — over just enough
+        // of the body for 240 characters, not the whole document (this
+        // runs on every save and autosave).
+        var collapsed = ""
+        var pendingSpace = false
+        var count = 0
+        for ch in body {
+            if ch.isWhitespace {
+                pendingSpace = count > 0
+                continue
+            }
+            if count >= 240 { return collapsed + "…" }
+            if pendingSpace {
+                collapsed.append(" ")
+                count += 1
+                pendingSpace = false
+            }
+            collapsed.append(ch)
+            count += 1
+        }
+        return collapsed
     }
 }

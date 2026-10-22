@@ -46,16 +46,69 @@ final class SyntaxHighlighter {
         return (code, math, front)
     }
 
+    /// The front matter block the last pass collapsed to the meta line,
+    /// nil when there is none or the caret has it open.
+    private(set) var foldedFrontmatter: NSRange?
+    /// The front matter block the last pass saw, folded or not.
+    private(set) var frontmatterBlock: NSRange?
+    /// The H1 the folded block's meta line is drawn under (board `Main`):
+    /// set when the first non-blank line after the block is an H1. nil
+    /// while the block is open, or when the meta line takes the block's
+    /// own first line because no H1 follows.
+    private(set) var frontmatterMetaAnchor: NSRange?
+    /// The find bar's current match. Inside the front matter it keeps the
+    /// block open, like the caret does, so the match can be seen.
+    var searchMatchToReveal: NSRange?
+
+    /// The meta line's font: the body font at 13/15 of the body size,
+    /// the board's subtitle-to-body ratio.
+    static func metaLineFont(for theme: EditorTheme) -> NSFont {
+        theme.resolvedBodyFont(size: (theme.fontBaseSize * 13 / 15).rounded())
+    }
+
+    private static let lineHeightProbe = NSLayoutManager()
+
+    /// Height reserved for the meta line: one line of its font.
+    static func metaLineHeight(for theme: EditorTheme) -> CGFloat {
+        ceil(lineHeightProbe.defaultLineHeight(for: metaLineFont(for: theme)))
+    }
+
+    /// Space between an H1 and the meta line under it: the board's 6 pt
+    /// at a 15 pt body, scaled with the body size.
+    static func metaLineGap(for theme: EditorTheme) -> CGFloat {
+        (theme.fontBaseSize * 6 / 15).rounded()
+    }
+
+    /// The `# ` heading on the first non-blank line after `block`, or nil
+    /// when that line is anything else (or there is none).
+    static func h1DirectlyAfter(_ block: NSRange, in source: NSString) -> NSRange? {
+        var location = NSMaxRange(block)
+        while location < source.length {
+            let line = source.lineRange(for: NSRange(location: location, length: 0))
+            let text = source.substring(with: line)
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                guard let match = headingRegex.firstMatch(in: source as String, range: line),
+                      match.range.location == line.location,
+                      match.range(at: 1).length == 1 else { return nil }
+                return match.range
+            }
+            location = NSMaxRange(line)
+        }
+        return nil
+    }
+
+    /// Spacing under an H1 or H2 while Settings ▸ Editor ▸ Hairline is on.
+    private static func headingRuleParagraphStyle() -> NSMutableParagraphStyle {
+        let para = NSMutableParagraphStyle()
+        para.paragraphSpacing = 6
+        para.paragraphSpacingBefore = 4
+        return para
+    }
+
     // Patterns shared with BlockExtractor live in MarkdownRegexes.
     private static var fencedCodeRegex: NSRegularExpression { MarkdownRegexes.fencedCode }
-    private static let headingRegex = try! NSRegularExpression(
-        pattern: #"^(#{1,6})([ \t]+)(.+?)[ \t]*#*$"#,
-        options: [.anchorsMatchLines]
-    )
-    private static let blockquoteRegex = try! NSRegularExpression(
-        pattern: #"^(>[ \t]?)(.*)$"#,
-        options: [.anchorsMatchLines]
-    )
+    private static var headingRegex: NSRegularExpression { MarkdownRegexes.heading }
+    private static var blockquoteRegex: NSRegularExpression { MarkdownRegexes.blockquote }
     private static let listRegex = try! NSRegularExpression(
         pattern: #"^([ \t]*)([-*+]|\d+\.)([ \t]+)"#,
         options: [.anchorsMatchLines]
@@ -64,43 +117,19 @@ final class SyntaxHighlighter {
     // — used by both this highlighter (for concealment + strike-through)
     // and the overlay manager (for view placement) so they can never
     // disagree on which lines have checkboxes.
-    private static let boldRegex = try! NSRegularExpression(
-        pattern: #"(?<![*_\w])(\*\*|__)(?=\S)([\s\S]+?)(?<=\S)\1(?![*_\w])"#,
-        options: []
-    )
-    private static let italicRegex = try! NSRegularExpression(
-        pattern: #"(?<![*_\w])(\*|_)(?=\S)([^*_\n]+?)(?<=\S)\1(?![*_\w])"#,
-        options: []
-    )
-    private static let inlineCodeRegex = try! NSRegularExpression(
-        pattern: #"(`+)([^`\n]+?)\1"#,
-        options: []
-    )
-    private static let linkRegex = try! NSRegularExpression(
-        pattern: #"(!?)\[([^\]]*)\]\(([^)]+)\)"#,
-        options: []
-    )
-    private static let strikethroughRegex = try! NSRegularExpression(
-        pattern: #"(~~)(?=\S)([\s\S]+?)(?<=\S)\1"#,
-        options: []
-    )
-    private static let highlightRegex = try! NSRegularExpression(
-        pattern: #"(==)(?=\S)([\s\S]+?)(?<=\S)\1"#,
-        options: []
-    )
+    private static var boldRegex: NSRegularExpression { MarkdownRegexes.bold }
+    private static var italicRegex: NSRegularExpression { MarkdownRegexes.italic }
+    private static var inlineCodeRegex: NSRegularExpression { MarkdownRegexes.inlineCode }
+    private static var linkRegex: NSRegularExpression { MarkdownRegexes.link }
+    private static var strikethroughRegex: NSRegularExpression { MarkdownRegexes.strikethrough }
+    private static var highlightRegex: NSRegularExpression { MarkdownRegexes.highlight }
     private static let hrRegex = try! NSRegularExpression(
         pattern: #"^[ \t]*(\*[ \t]*\*[ \t]*\*[\* \t]*|-[ \t]*-[ \t]*-[\- \t]*|_[ \t]*_[ \t]*_[_ \t]*)$"#,
         options: [.anchorsMatchLines]
     )
-    private static let mathInlineRegex = try! NSRegularExpression(
-        pattern: #"(?<!\$)(\$)(?!\s)([^\$\n]+?)(?<!\s)\1(?!\$)"#,
-        options: []
-    )
+    private static var mathInlineRegex: NSRegularExpression { MarkdownRegexes.mathInline }
     private static var mathBlockRegex: NSRegularExpression { MarkdownRegexes.mathBlock }
-    private static let frontmatterRegex = try! NSRegularExpression(
-        pattern: #"\A---\n[\s\S]*?\n---\n"#,
-        options: []
-    )
+    private static var frontmatterRegex: NSRegularExpression { MarkdownRegexes.frontmatter }
     private static let footnoteRefRegex = try! NSRegularExpression(
         pattern: #"\[\^([^\]]+)\]"#,
         options: []
@@ -159,10 +188,12 @@ final class SyntaxHighlighter {
         taskMatches: [TaskListMatch]? = nil
     ) {
         let fullRange = NSRange(location: 0, length: textStorage.length)
+        foldedFrontmatter = nil
+        frontmatterBlock = nil
         guard fullRange.length > 0 else { return }
         let source = textStorage.string
         let palette = renderPalette()
-        let baseFont = theme.bodyFont.font(size: theme.fontBaseSize)
+        let baseFont = theme.resolvedBodyFont(size: theme.fontBaseSize)
         let cursor = cursorRange ?? NSRange(location: -1, length: 0)
         let blockRanges = blocks.map { $0.range }
         // Working range = the slice of the document we'll re-attribute on
@@ -337,10 +368,49 @@ final class SyntaxHighlighter {
         cursor: NSRange,
         taskMatches: [TaskListMatch]
     ) {
-        // Frontmatter — muted code-block-style for the leading `---` block.
-        for r in frontmatterRanges {
-            textStorage.addAttribute(.foregroundColor, value: palette.muted, range: r)
-            textStorage.addAttribute(.font, value: monoFont(size: theme.fontBaseSize - 1), range: r)
+        // Frontmatter. With the caret outside, the YAML collapses to one
+        // reserved line that `PicaMDTextView` fills with the grey meta
+        // line (date · tags); with the caret inside it shows raw, muted
+        // code-block style — the caret-line reveal, for the whole block.
+        // Painted over its full range whatever the working slice: it is
+        // small, and a fold decided while the top is off-screen must not
+        // leave half the block in the previous state.
+        //
+        // When an H1 follows the block (blank lines aside), the meta line
+        // goes under that H1 instead, as in the board: the block then
+        // takes no height at all and the H1 gets the room below it.
+        foldedFrontmatter = nil
+        frontmatterBlock = nil
+        frontmatterMetaAnchor = nil
+        var titleAfterBlock: NSRange?
+        for r in frontmatterRanges where NSMaxRange(r) <= textStorage.length {
+            frontmatterBlock = r
+            let title = Self.h1DirectlyAfter(r, in: source as NSString)
+            titleAfterBlock = title
+            let matchInside = searchMatchToReveal.map { $0.location < NSMaxRange(r) } ?? false
+            if !matchInside,
+               FrontmatterFold.isFolded(selection: cursor, block: r, in: source as NSString) {
+                textStorage.setAttributes([
+                    .foregroundColor: NSColor.clear,
+                    .font: tinyFont(),
+                ], range: r)
+                if title == nil {
+                    let firstLine = (source as NSString).lineRange(for: NSRange(location: r.location, length: 0))
+                    let para = NSMutableParagraphStyle()
+                    let height = Self.metaLineHeight(for: theme)
+                    para.minimumLineHeight = height
+                    para.maximumLineHeight = height
+                    textStorage.addAttribute(.paragraphStyle, value: para,
+                                             range: NSIntersectionRange(firstLine, r))
+                }
+                foldedFrontmatter = r
+                frontmatterMetaAnchor = title
+            } else {
+                textStorage.setAttributes([
+                    .foregroundColor: palette.muted,
+                    .font: monoFont(size: theme.fontBaseSize - 1),
+                ], range: r)
+            }
         }
 
         // Headings — proportional fonts per level, hash markers conceal
@@ -365,9 +435,7 @@ final class SyntaxHighlighter {
             }
 
             if theme.headingRule && level <= 2 {
-                let para = NSMutableParagraphStyle()
-                para.paragraphSpacing = 6
-                para.paragraphSpacingBefore = 4
+                let para = Self.headingRuleParagraphStyle()
                 textStorage.addAttribute(.paragraphStyle, value: para, range: m.range)
                 textStorage.addAttribute(.underlineStyle,
                                          value: NSUnderlineStyle.single.rawValue,
@@ -375,6 +443,24 @@ final class SyntaxHighlighter {
                 textStorage.addAttribute(.underlineColor,
                                          value: palette.muted.withAlphaComponent(0.45),
                                          range: m.range)
+            }
+        }
+
+        // The H1 under the front matter: room for the meta line below it
+        // while the block is folded, its plain heading spacing while it
+        // is open. Set from scratch on every pass, whatever the working
+        // slice, like the block itself: a fold toggled while the H1 is
+        // outside the slice must not leave the room behind.
+        if let title = titleAfterBlock {
+            let rule = theme.headingRule
+            if frontmatterMetaAnchor != nil {
+                let para = rule ? Self.headingRuleParagraphStyle() : NSMutableParagraphStyle()
+                para.paragraphSpacing += Self.metaLineGap(for: theme) + Self.metaLineHeight(for: theme)
+                textStorage.addAttribute(.paragraphStyle, value: para, range: title)
+            } else if rule {
+                textStorage.addAttribute(.paragraphStyle, value: Self.headingRuleParagraphStyle(), range: title)
+            } else {
+                textStorage.removeAttribute(.paragraphStyle, range: title)
             }
         }
 
@@ -497,8 +583,15 @@ final class SyntaxHighlighter {
         }
 
         // Math block — conceal `$$` fences when cursor is outside, render inner as math.
-        for r in mathBlockRanges {
-            let active = cursor.touchesBlock(r)
+        for block in mathBlockRanges {
+            // Only restyle the part inside this pass's working slice. The
+            // overlay concealment re-applies within the slice only, so
+            // painting whole blocks here un-concealed every math block
+            // outside it on each keystroke (and in the theme sweep, each
+            // chunk undid the previous chunks' blocks).
+            let r = NSIntersectionRange(block, workingRange)
+            guard r.length > 0 else { continue }
+            let active = cursor.touchesBlock(block)
             textStorage.setAttributes([
                 .font: NSFont.systemFont(ofSize: theme.fontBaseSize + 1),
                 .foregroundColor: palette.math,
@@ -511,10 +604,12 @@ final class SyntaxHighlighter {
             textStorage.addAttribute(.paragraphStyle, value: centerPara, range: r)
             if !active {
                 let nsSource = source as NSString
-                let openLine = nsSource.lineRange(for: NSRange(location: r.location, length: 0))
-                let closeLineStart = r.location + r.length
+                let openLine = nsSource.lineRange(for: NSRange(location: block.location, length: 0))
+                let closeLineStart = block.location + block.length
                 let closeLine = nsSource.lineRange(for: NSRange(location: max(0, closeLineStart - 1), length: 0))
-                for fence in [openLine, closeLine] where fence.length > 0 {
+                for fenceLine in [openLine, closeLine] {
+                    let fence = NSIntersectionRange(fenceLine, workingRange)
+                    guard fence.length > 0 else { continue }
                     textStorage.addAttribute(.foregroundColor, value: NSColor.clear, range: fence)
                     textStorage.addAttribute(.font, value: tinyFont(), range: fence)
                 }
@@ -790,7 +885,18 @@ final class SyntaxHighlighter {
         // for the overlay view to draw on top.
         for block in blocks {
             let r = block.range
-            if cursor.touches(r) { continue }   // editing — keep source
+            // `touchesBlock`, not `touches`: the trailing +1 fuzz of the
+            // latter made a caret on the FIRST character of the line below a
+            // table count as "editing the table", so the source was revealed
+            // and no height reserved — while the overlay manager, using a
+            // predicate without that fuzz, kept the opaque table drawn on top
+            // of the now-visible pipe source. Both sides must agree exactly.
+            if cursor.touchesBlock(r) { continue }   // editing — keep source
+            // No measured height for this block on this pass — the caller had
+            // no resolved width yet. Concealing without reserving would leave
+            // the source collapsed to a 0.01 pt line with nothing drawn over
+            // it, so skip the block entirely: handle it fully or not at all.
+            guard let height = blockHeights[block] else { continue }
             let rWork = NSIntersectionRange(r, work)
             if rWork.length == 0 { continue }   // overlay block outside this slice
             let nsSource = source as NSString
@@ -798,16 +904,15 @@ final class SyntaxHighlighter {
                 .foregroundColor: NSColor.clear,
                 .font: tinyFont(),
             ], range: rWork)
-            // The min-line-height reservation goes on the block's first
-            // line — apply only when that line is in the current slice.
+            // The reservation goes on the block's first line, and must be
+            // written whenever we conceal. Gating it on `firstLine ∩ work`
+            // let a block that starts above the slice but reaches into it be
+            // concealed WITHOUT a band — collapsing it to a stub.
             let firstLine = nsSource.lineRange(for: NSRange(location: r.location, length: 0))
-            if NSIntersectionRange(firstLine, work).length > 0 {
-                let height = blockHeights[block] ?? defaultHeight(for: block.kind)
-                let para = NSMutableParagraphStyle()
-                para.minimumLineHeight = height + 8
-                para.maximumLineHeight = height + 8
-                textStorage.addAttribute(.paragraphStyle, value: para, range: firstLine)
-            }
+            let para = NSMutableParagraphStyle()
+            para.minimumLineHeight = height + EditorLayout.blockOverlayHeightPadding
+            para.maximumLineHeight = height + EditorLayout.blockOverlayHeightPadding
+            textStorage.addAttribute(.paragraphStyle, value: para, range: firstLine)
         }
     }
 
@@ -1184,6 +1289,16 @@ private extension NSRange {
         return cursorEnd >= expandedStart && location <= expandedEnd
     }
 
+}
+
+/// Deliberately module-visible, unlike the helpers above: this predicate is a
+/// shared contract between `SyntaxHighlighter` (which decides whether to
+/// conceal a block and reserve its height) and `BlockOverlayManager` (which
+/// decides whether to hide the overlay drawn on top of it). If the two ever
+/// answer this question differently, the editor shows an opaque rendered block
+/// sitting on top of un-concealed markdown source — so there must be exactly
+/// one definition.
+extension NSRange {
     /// Block-level variant of `touches(_:)` — no trailing +1 fuzz so a cursor
     /// positioned exactly one character PAST the end of a block (i.e. on the
     /// first character of the next line) does NOT count as touching. The

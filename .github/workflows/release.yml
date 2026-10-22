@@ -1,6 +1,6 @@
 name: Release
 
-# Triggered by pushing a tag like `v0.8.0-alpha` or `v1.0.0`. Builds
+# Triggered by pushing a tag like `v0.10.0` or `v1.0.0-beta.1`. Builds
 # Release, ad-hoc-signs, zips, and uploads the .zip + a SHA-256
 # checksum to a GitHub Release. The checksum lets users verify
 # their download (and pairs with Sparkle's appcast for in-app
@@ -9,8 +9,8 @@ name: Release
 # When `secrets.NOTARIZE_API_KEY` etc. exist, the workflow can be
 # extended to also notarize via Apple's notary service. Until then
 # (free Developer account), the .zip is ad-hoc signed only —
-# users see a Gatekeeper warning on first open and right-click → Open
-# to bypass it. The README spells this out.
+# users see a Gatekeeper warning on first open and need System
+# Settings ▸ Privacy & Security ▸ Open Anyway. The README spells this out.
 
 on:
   push:
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version to release (e.g. 0.8.0). Bumps project.yml in-place before build."
+        description: "Version to release (e.g. 0.10.0). Bumps project.yml in-place before build."
         required: false
         type: string
 
@@ -33,15 +33,15 @@ concurrency:
 jobs:
   build-and-release:
     name: Build, sign (ad-hoc), package
-    runs-on: macos-15
+    # Same image as CI: macOS 27.0.1, Xcode 27.0 as default. Shipped
+    # builds need the macOS 27 SDK for the macOS 27 look, and the
+    # deployment target of 27.0 does not build with older Xcode.
+    runs-on: xcode-27
     timeout-minutes: 30
-
-    env:
-      DEVELOPER_DIR: /Applications/Xcode_16.app/Contents/Developer
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0   # release.sh reads git tag history
 
@@ -50,7 +50,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
-            # Strip the leading `v` from the tag (`v0.8.0-alpha` → `0.8.0-alpha`).
+            # Strip the leading `v` from the tag (`v0.10.0` → `0.10.0`).
             VERSION="${GITHUB_REF_NAME#v}"
           elif [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION="${{ github.event.inputs.version }}"
@@ -90,11 +90,13 @@ jobs:
             echo
             echo "Native macOS Markdown editor with live preview, AI presets, and Claude Code MCP server."
             echo
+            echo "Requires macOS 27 or later."
+            echo
             echo "## Install"
             echo
             echo '1. Download `PicaMD-'"$VERSION"'.zip`'
             echo "2. Unzip and drag \`PicaMD.app\` into \`/Applications/\`"
-            echo "3. **First launch**: right-click \`PicaMD.app\` → **Open** → confirm in the dialog."
+            echo "3. **First launch**: open PicaMD once, then System Settings ▸ Privacy & Security ▸ **Open Anyway**."
             echo "   (This release is ad-hoc signed because the project doesn't yet have an Apple Developer ID. macOS will warn you on first launch only — subsequent launches are unimpeded.)"
             echo
             echo "Alternative one-liner: \`xattr -dr com.apple.quarantine /Applications/PicaMD.app\`"
@@ -108,17 +110,23 @@ jobs:
             echo
             echo "## Changelog"
             echo
-            # Try to pull the matching section from CHANGELOG.md
-            if grep -q "## \[$VERSION\]" CHANGELOG.md 2>/dev/null; then
-              awk "/## \[$VERSION\]/,/## \[/" CHANGELOG.md | sed '$d'
+            # The section of CHANGELOG.md for this version: from its
+            # heading to the next "## [" heading. A range pattern
+            # (/start/,/## \[/) ended on its own first line, because the
+            # heading matches the end pattern too, so the notes were empty.
+            # `index` instead of a regex: the dots in the version are
+            # literal. Rename [Unreleased] to [x.y.z] before tagging.
+            if grep -qF "## [$VERSION]" CHANGELOG.md 2>/dev/null; then
+              awk -v v="$VERSION" 'index($0, "## [" v "]") == 1 { f = 1; next } /^## \[/ { f = 0 } f' CHANGELOG.md
             else
-              echo "See [CHANGELOG.md](CHANGELOG.md) for the full set of changes."
+              # A relative link is dead in a release body.
+              echo "See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md) for the full set of changes."
             fi
           } > "$NOTES"
           echo "Generated $NOTES"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ github.ref_name }}
           name: PicaMD ${{ steps.ver.outputs.version }}

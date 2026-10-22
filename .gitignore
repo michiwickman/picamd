@@ -5,6 +5,8 @@ PicaMD.xcodeproj/
 
 # Build outputs
 build-release/
+build-test/
+*.xcresult
 build/
 DerivedData/
 *.app
@@ -23,26 +25,21 @@ xcuserdata/
 .idea/
 .swiftpm/
 
-# Compressed design archives — source files live in QuickMD Design/
-QuickMD Design.zip
-
 # Coverage temp files
-default.profraw
+*.profraw
 
 # release.sh output — built artefacts go in GH Releases, not git
 dist/
 
-# Internal-only / dev-process documents (never committed)
-PHASES.md
-PRÄSENTATION.md
-ADVERSARIAL_REVIEW.md
-V4_ANALYSIS.md
-TYPORA_PARITY_ROADMAP.md
-TECH_DEBT.md
-TECH_DEBT_REMAINING.md
-QuickMD Design/
-QuickMD Design.zip
+# release.yml writes the release body here
+release-notes.md
 
 # Local dev scratch
 .local/
 .notes/
+
+# Icon renditions from design/icon/build.sh (preview.png is committed)
+design/icon/renders/
+
+# Claude Code session state and worktrees
+.claude/

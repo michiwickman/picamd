@@ -52,7 +52,10 @@ echo "Linked:  $(otool -L "$BUILT_APP/Contents/MacOS/PicaMD" | tail -n +2 | wc -
 
 if [ "$INSTALL_TO_APPLICATIONS" = "1" ]; then
     echo "==> Installing to /Applications"
-    rm -rf "/Applications/PicaMD.app"
+    # Never `rm` — the previous copy goes to the Trash so an install can
+    # always be undone from the Finder. `trash` exits non-zero when the
+    # target is absent, which is fine on a first install.
+    [ -d "/Applications/PicaMD.app" ] && /usr/bin/trash "/Applications/PicaMD.app"
     cp -R "$BUILT_APP" "/Applications/"
     # `cp` triggers a Finder re-scan on /Applications which registers
     # the copy automatically — no explicit `lsregister` needed.

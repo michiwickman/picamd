@@ -99,6 +99,58 @@ struct Palette: Equatable, Codable {
         let luma = 0.2126 * r + 0.7152 * g + 0.0722 * b
         return luma < 0.5
     }
+
+    /// The "Custom" palette: the user picks only text and background, and
+    /// every other token is derived here so code blocks, rules and muted
+    /// text stay legible on any pair. The mix ratios are read off the
+    /// built-in palettes (e.g. white's `bgTint` is the background moved
+    /// ~4 % toward the text colour, dark grey's ~6 %). Colours with no
+    /// sensible derivation from two inputs — syntax keyword, highlight,
+    /// math, the palette accent — come from `base`, the built-in palette
+    /// the user came from, when it is as light or dark as the custom
+    /// background; otherwise from the built-in light or dark palette,
+    /// picked by the background's luminance like `isDark`. Custom colours
+    /// still equal to the base's own text and background give the base
+    /// palette unchanged, so the first switch to Custom changes nothing
+    /// visible (on Off-White, headings and links used to turn from amber
+    /// to blue).
+    static func custom(background: NSColor, text: NSColor, base: Palette? = nil) -> Palette {
+        let bg = background.usingColorSpace(.sRGB)?.withAlphaComponent(1) ?? background
+        let fg = text.usingColorSpace(.sRGB)?.withAlphaComponent(1) ?? text
+        if let base, base.bg.toHex() == bg.toHex(), base.fg.toHex() == fg.toHex() {
+            return base
+        }
+        let probe = Palette.white.with(bg: bg, fg: fg)
+        let dark = probe.isDark
+        let base = base.flatMap { $0.isDark == dark ? $0 : nil }
+            ?? (dark ? Palette.darkgrey : Palette.white)
+        func mix(_ fraction: CGFloat) -> NSColor {
+            bg.blended(withFraction: fraction, of: fg) ?? bg
+        }
+        return Palette(
+            bg:           bg,
+            bgTint:       mix(dark ? 0.06 : 0.04),
+            fg:           fg,
+            fgMuted:      fg.withAlphaComponent(dark ? 0.50 : 0.55),
+            rule:         fg.withAlphaComponent(dark ? 0.10 : 0.12),
+            ruleStrong:   fg.withAlphaComponent(dark ? 0.22 : 0.28),
+            chrome:       bg.withAlphaComponent(0.78),
+            codeBg:       mix(dark ? 0.045 : 0.03),
+            codeInlineBg: mix(dark ? 0.07 : 0.05),
+            codeFg:       fg,
+            synKw:        base.synKw,
+            accent:       base.accent,
+            highlight:    base.highlight,
+            math:         base.math
+        )
+    }
+
+    private func with(bg: NSColor, fg: NSColor) -> Palette {
+        var copy = self
+        copy.bg = bg
+        copy.fg = fg
+        return copy
+    }
 }
 
 // MARK: - PaletteName
@@ -196,14 +248,44 @@ enum HeadingFontFamily: String, CaseIterable, Identifiable, Codable {
         case .sans:
             return .systemFont(ofSize: size, weight: weight)
         case .serif:
-            // Try New York (system serif) first; fall back to Georgia.
-            let descriptor = NSFontDescriptor(name: "New York", size: size)
-                .addingAttributes([.traits: [NSFontDescriptor.TraitKey.weight: weight]])
-            if let font = NSFont(descriptor: descriptor, size: size) {
-                return font
-            }
-            return NSFont(name: "Georgia-Bold", size: size)
-                ?? .systemFont(ofSize: size, weight: weight)
+            return SystemSerif.font(size: size, weight: weight)
+        }
+    }
+}
+
+/// New York, the system serif. It is a hidden system font (PostScript
+/// names start with a dot), so looking it up by the family name "New
+/// York" fails and the old code silently fell back to Georgia. The
+/// supported route is the system font's `.serif` design.
+enum SystemSerif {
+    static let familyDisplayName = "New York"
+
+    static func font(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        let system = NSFont.systemFont(ofSize: size, weight: weight)
+        if let descriptor = system.fontDescriptor.withDesign(.serif),
+           let font = NSFont(descriptor: descriptor, size: size) {
+            return font
+        }
+        return NSFont(name: weight >= .semibold ? "Georgia-Bold" : "Georgia", size: size) ?? system
+    }
+}
+
+/// What the Font popup in Settings ▸ Appearance shows. Stored as the
+/// pair `bodyFont` (mono | sans, understood by every build) plus the
+/// optional `bodyFontName` (a family name, newer builds only).
+enum BodyFontSelection: Hashable {
+    case sfPro
+    case sfMono
+    case newYork
+    /// Any installed family picked through the font panel.
+    case family(String)
+
+    var displayName: String {
+        switch self {
+        case .sfPro: return "SF Pro"
+        case .sfMono: return "SF Mono"
+        case .newYork: return SystemSerif.familyDisplayName
+        case .family(let name): return name
         }
     }
 }
@@ -216,7 +298,7 @@ enum AccentChoice: String, CaseIterable, Identifiable, Codable {
     var id: String { rawValue }
     var displayName: String {
         switch self {
-        case .system: return "System (Blue)"
+        case .system: return "System (palette default)"
         case .blue:   return "Blue"
         case .orange: return "Warm Orange"
         case .pink:   return "Pink"
@@ -239,10 +321,75 @@ enum AccentChoice: String, CaseIterable, Identifiable, Codable {
     }
 }
 
+// MARK: - Appearance / line width
+
+/// Light or dark window chrome (sidebar, toolbar, settings). The editor
+/// surface does not follow it: its colours come from the palette, so an
+/// OLED editor stays black under a light system appearance.
+enum AppearanceMode: String, CaseIterable, Identifiable, Codable {
+    case automatic, light, dark
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .automatic: return "Automatic"
+        case .light:     return "Light"
+        case .dark:      return "Dark"
+        }
+    }
+
+    /// Value for `NSApp.appearance`; `nil` follows the system.
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .automatic: return nil
+        case .light:     return NSAppearance(named: .aqua)
+        case .dark:      return NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
+/// Maximum width of the text column. Measured in characters of the body
+/// font rather than points, so the column keeps its line length when the
+/// user switches between a wide mono and a narrow proportional font.
+enum LineWidth: String, CaseIterable, Identifiable, Codable {
+    case readable, wide, full
+
+    var id: String { rawValue }
+    var displayName: String {
+        switch self {
+        case .readable: return "Readable"
+        case .wide:     return "Wide"
+        case .full:     return "Full"
+        }
+    }
+
+    /// Characters per line; `nil` = no limit.
+    var characters: CGFloat? {
+        switch self {
+        case .readable: return 66
+        case .wide:     return 100
+        case .full:     return nil
+        }
+    }
+
+    /// Column width in points for `font`: `characters` times the advance
+    /// of the digit "0" (the CSS `ch` unit). `.infinity` for `.full`.
+    func columnWidth(for font: NSFont) -> CGFloat {
+        guard let characters else { return .infinity }
+        let zero = ("0" as NSString).size(withAttributes: [.font: font]).width
+        return (characters * zero).rounded()
+    }
+}
+
 // MARK: - EditorTheme
 
 /// Aggregate of every tweakable. Equatable so view layers can diff and
 /// re-render only when something actually changed.
+///
+/// Persisted as JSON (`ThemeStore`). The decoder is hand-written (see the
+/// extension below): every field added after 0.9 is optional in the JSON
+/// and falls back to the value that reproduces the old look, so a stored
+/// theme from an older build never resets.
 struct EditorTheme: Equatable, Codable {
     var preset: PresetVariant
     var paletteName: PaletteName
@@ -252,10 +399,35 @@ struct EditorTheme: Equatable, Codable {
     var headingScale: HeadingScale
     var codeStyle: CodeBlockStyle
     var headingRule: Bool
+    /// Persisted under its old name; the setting is "Show word count" now.
     var showStatusBar: Bool
     var fontBaseSize: CGFloat
+    /// Window chrome only (see `AppearanceMode`).
+    var appearance: AppearanceMode = .automatic
+    var lineWidth: LineWidth = .readable
+    /// The Tahoe "floating card" editor look, formerly implied by
+    /// `preset == .tahoe`.
+    var cardLayout: Bool = false
+    /// When on, `palette` is derived from the two custom colours below.
+    /// `paletteName` keeps the last built-in choice, so an older build
+    /// reading this JSON still finds a palette it knows.
+    var useCustomColors: Bool = false
+    /// `#rrggbb`.
+    var customTextColor: String? = nil
+    /// `#rrggbb`.
+    var customBackgroundColor: String? = nil
+    /// Body font family chosen beyond SF Pro / SF Mono ("New York" or any
+    /// installed family). Wins over `bodyFont` when it resolves.
+    var bodyFontName: String? = nil
 
-    var palette: Palette { paletteName.palette }
+    var palette: Palette {
+        if useCustomColors,
+           let text = customTextColor.flatMap(NSColor.init(validHex:)),
+           let background = customBackgroundColor.flatMap(NSColor.init(validHex:)) {
+            return .custom(background: background, text: text, base: paletteName.palette)
+        }
+        return paletteName.palette
+    }
 
     /// Effective accent colour: explicit accent if set, else palette's own
     /// accent (used for "system" → palette default).
@@ -266,18 +438,132 @@ struct EditorTheme: Equatable, Codable {
         }
     }
 
+    /// The one place the body font is resolved. Highlighter, text view and
+    /// reflow all call this, so they can never disagree.
+    func resolvedBodyFont(size: CGFloat) -> NSFont {
+        if let name = bodyFontName {
+            if name == SystemSerif.familyDisplayName {
+                return SystemSerif.font(size: size)
+            }
+            if let font = NSFontManager.shared.font(withFamily: name, traits: [],
+                                                    weight: 5, size: size) {
+                return font
+            }
+        }
+        return bodyFont.font(size: size)
+    }
+
+    var bodyFontSelection: BodyFontSelection {
+        if let name = bodyFontName {
+            return name == SystemSerif.familyDisplayName ? .newYork : .family(name)
+        }
+        return bodyFont == .mono ? .sfMono : .sfPro
+    }
+
+    /// Writes both fields so an older build (which only knows `bodyFont`)
+    /// still gets the closest match: mono for fixed-pitch families, sans
+    /// for everything else.
+    mutating func setBodyFontSelection(_ selection: BodyFontSelection) {
+        switch selection {
+        case .sfPro:
+            bodyFont = .sans
+            bodyFontName = nil
+        case .sfMono:
+            bodyFont = .mono
+            bodyFontName = nil
+        case .newYork:
+            bodyFont = .sans
+            bodyFontName = SystemSerif.familyDisplayName
+        case .family(let name):
+            let probe = NSFontManager.shared.font(withFamily: name, traits: [], weight: 5, size: 13)
+            bodyFont = probe?.isFixedPitch == true ? .mono : .sans
+            bodyFontName = name
+        }
+    }
+
+    /// `false` when two themes differ only in fields that never touch the
+    /// text's attributes (chrome appearance, column width, word count,
+    /// card look, preset label). The editor then skips the full-document
+    /// re-colouring pass.
+    func restyles(comparedTo other: EditorTheme) -> Bool {
+        stylingFields != other.stylingFields
+    }
+
+    private var stylingFields: EditorTheme {
+        var t = self
+        t.preset = .stockPlus
+        t.appearance = .automatic
+        t.lineWidth = .full
+        t.cardLayout = false
+        t.showStatusBar = true
+        return t
+    }
+
+    /// A fresh install. Differs from what an old JSON decodes to in
+    /// `bodyFont` (SF Pro instead of SF Mono) and `lineWidth` (readable
+    /// instead of full): existing users keep their look, new users get
+    /// the 0.10 defaults.
     static let `default` = EditorTheme(
         preset: .stockPlus,
         paletteName: .white,
         accent: .system,
-        bodyFont: .mono,
+        bodyFont: .sans,
         headingFont: .sans,
         headingScale: .defaultScale,
         codeStyle: .card,
         headingRule: false,
         showStatusBar: true,
-        fontBaseSize: 14.5
+        fontBaseSize: 14.5,
+        appearance: .automatic,
+        lineWidth: .readable,
+        cardLayout: false
     )
+
+    /// Settings shows sizes as "17 pt" and "14.5 pt" (the old label
+    /// truncated 14.5 to "14 pt"). `%g` always uses a period and drops a
+    /// trailing ".0".
+    static func formattedSize(_ size: CGFloat) -> String {
+        String(format: "%g pt", Double(size))
+    }
+}
+
+extension EditorTheme {
+    private enum CodingKeys: String, CodingKey {
+        case preset, paletteName, accent, bodyFont, headingFont, headingScale,
+             codeStyle, headingRule, showStatusBar, fontBaseSize,
+             appearance, lineWidth, cardLayout, useCustomColors,
+             customTextColor, customBackgroundColor, bodyFontName
+    }
+
+    /// Fields that every build since 0.1 writes stay strictly required: a
+    /// blob missing one is corrupt and `ThemeStore` falls back (and backs
+    /// it up). Newer fields are optional, and an unknown value in one of
+    /// them (written by a future build) resets only that field.
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        preset        = try c.decode(PresetVariant.self, forKey: .preset)
+        paletteName   = try c.decode(PaletteName.self, forKey: .paletteName)
+        accent        = try c.decode(AccentChoice.self, forKey: .accent)
+        bodyFont      = try c.decode(BodyFontFamily.self, forKey: .bodyFont)
+        headingFont   = try c.decode(HeadingFontFamily.self, forKey: .headingFont)
+        headingScale  = try c.decode(HeadingScale.self, forKey: .headingScale)
+        codeStyle     = try c.decode(CodeBlockStyle.self, forKey: .codeStyle)
+        headingRule   = try c.decode(Bool.self, forKey: .headingRule)
+        showStatusBar = try c.decode(Bool.self, forKey: .showStatusBar)
+        fontBaseSize  = try c.decode(CGFloat.self, forKey: .fontBaseSize)
+
+        func optional<T: Decodable>(_ type: T.Type, _ key: CodingKeys) -> T? {
+            (try? c.decodeIfPresent(type, forKey: key)) ?? nil
+        }
+        // Defaults for a JSON without the key: the look before 0.10.
+        appearance            = optional(AppearanceMode.self, .appearance) ?? .automatic
+        lineWidth             = optional(LineWidth.self, .lineWidth) ?? .full
+        cardLayout            = optional(Bool.self, .cardLayout) ?? (preset == .tahoe)
+        useCustomColors       = optional(Bool.self, .useCustomColors) ?? false
+        customTextColor       = optional(String.self, .customTextColor)
+        customBackgroundColor = optional(String.self, .customBackgroundColor)
+        bodyFontName          = optional(String.self, .bodyFontName)
+    }
 }
 
 // MARK: - NSColor hex helper
@@ -302,6 +588,19 @@ extension NSColor {
             a = 1.0
         }
         self.init(srgbRed: r, green: g, blue: b, alpha: a)
+    }
+}
+
+extension NSColor {
+    /// Like `init(hex:)`, but `nil` unless the string is exactly six or
+    /// eight hex digits (with or without "#"). Stored custom colours go
+    /// through this so a damaged value falls back to the built-in palette
+    /// instead of painting black.
+    convenience init?(validHex: String) {
+        var s = validHex.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.hasPrefix("#") { s.removeFirst() }
+        guard s.count == 6 || s.count == 8, s.allSatisfy(\.isHexDigit) else { return nil }
+        self.init(hex: s)
     }
 }
 

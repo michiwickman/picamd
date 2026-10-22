@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        We're in alpha — `PHASES.md` defines the v1.0 scope. New
-        feature requests are welcome to discuss but most won't make
-        v1.0 unless they fit an existing phase.
+        PicaMD is meant to stay a small editor and viewer. Feature
+        requests are welcome to discuss, but most won't be built unless
+        they fit that scope.
 
   - type: textarea
     id: problem

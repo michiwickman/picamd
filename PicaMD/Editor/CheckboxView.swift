@@ -28,10 +28,33 @@ final class CheckboxView: NSView {
 
     /// Editor background colour. Painted as the box's interior fill so
     /// the concealed `[ ]` characters underneath don't bleed through.
-    /// Also used as the checkmark colour when `isChecked` is true so
-    /// the tick stays legible against the accent fill.
     var backgroundFillColor: NSColor = .textBackgroundColor {
         didSet { needsDisplay = true }
+    }
+
+    /// The task's own text ("Buy milk"), the checkbox's VoiceOver name.
+    /// Every checkbox used to be "Task checkbox", so a list of them could
+    /// not be told apart.
+    var taskText: String = "" {
+        didSet {
+            guard oldValue != taskText else { return }
+            setAccessibilityLabel(Self.accessibilityLabel(for: taskText))
+        }
+    }
+
+    static func accessibilityLabel(for taskText: String) -> String {
+        let text = taskText.trimmingCharacters(in: .whitespaces)
+        return text.isEmpty ? "Task" : text
+    }
+
+    /// The tick on the accent fill: black or white, whichever stands out
+    /// more. The palette background used to be drawn there, about 2:1 on
+    /// Green or Warm Orange over a white palette.
+    static func tickColor(on accent: NSColor) -> NSColor {
+        let l = PaletteSelectionStyle.relativeLuminance(accent)
+        let onWhite = 1.05 / (l + 0.05)
+        let onBlack = (l + 0.05) / 0.05
+        return onBlack > onWhite ? .black : .white
     }
 
     /// Toggle handler — the overlay manager wires this to a
@@ -56,8 +79,17 @@ final class CheckboxView: NSView {
         // click on a 14×14 target.
         setAccessibilityElement(true)
         setAccessibilityRole(.checkBox)
-        setAccessibilityLabel("Task checkbox")
+        setAccessibilityLabel(Self.accessibilityLabel(for: taskText))
         setAccessibilityValue(isChecked)
+    }
+
+    // Keyboard focus is drawn: the view takes first responder for Full
+    // Keyboard Access, and a custom view gets a ring only through a mask.
+    override var focusRingMaskBounds: NSRect { bounds }
+
+    override func drawFocusRingMask() {
+        let rect = bounds.insetBy(dx: 1.5, dy: 1.5)
+        NSBezierPath(roundedRect: rect, xRadius: 3, yRadius: 3).fill()
     }
 
     required init?(coder: NSCoder) {
@@ -79,7 +111,12 @@ final class CheckboxView: NSView {
 
     /// Space-bar toggles when the view has keyboard focus.
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
-        if event.charactersIgnoringModifiers == " " {
+        // Key equivalents are offered to every view in the window, so
+        // without these checks ⌃Space (the AI picker) toggled the first
+        // checkbox in the document.
+        let mods = event.modifierFlags.intersection(KeyCombo.relevantModifiers)
+        if window?.firstResponder === self, mods.isEmpty,
+           event.charactersIgnoringModifiers == " " {
             onToggle?()
             return true
         }
@@ -120,6 +157,12 @@ final class CheckboxView: NSView {
         // onto the line, which feels wrong (clicking a checkbox should
         // toggle, not navigate).
         onToggle?()
+        // Accepting first responder (for keyboard access) means the click
+        // just took focus from the editor — hand it back so typing
+        // continues where the caret was.
+        if let editor = superview as? NSTextView {
+            window?.makeFirstResponder(editor)
+        }
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -133,11 +176,11 @@ final class CheckboxView: NSView {
         path.lineWidth = 1.5
 
         if isChecked {
-            // Filled with accent, checkmark drawn in editor-bg colour
-            // so it stays legible across light & dark palettes.
+            // Filled with accent, checkmark in black or white by contrast
+            // with the accent.
             accentColor.setFill()
             path.fill()
-            drawCheckmark(in: rect, color: backgroundFillColor)
+            drawCheckmark(in: rect, color: Self.tickColor(on: accentColor))
         } else {
             // Border only. Stroke colour deepens slightly on hover so
             // the user knows the box is interactive.

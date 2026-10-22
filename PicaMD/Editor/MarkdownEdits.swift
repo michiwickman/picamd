@@ -30,24 +30,18 @@ enum MarkdownEdits {
         let targetLevel = allAtLevel ? 0 : level
 
         var result = nsString as String
-        // Iterate in reverse so earlier ranges aren't invalidated.
+        // Iterate in reverse so earlier ranges aren't invalidated. Each line
+        // keeps its own line break, whatever it is: deciding by
+        // `hasSuffix("\n")` dropped CRLF breaks, because "\r\n" is one
+        // Character and never ends in "\n".
         for r in lines.reversed() {
-            let lineText = (result as NSString).substring(with: r)
-            let stripped = stripHeadingMarker(from: lineText)
-            let newLine: String
-            if targetLevel == 0 {
-                newLine = stripped
-            } else {
-                newLine = String(repeating: "#", count: targetLevel) + " " + stripped.trimmingNewline()
-                // re-attach the trailing newline if the original had one
-                let suffix = lineText.hasSuffix("\n") ? "\n" : ""
-                _ = suffix
-            }
-            // Preserve trailing newline of the line if present.
-            let preservedNewline = lineText.hasSuffix("\n") && !newLine.hasSuffix("\n") ? "\n" : ""
-            let nsResult = result as NSString
-            let mutable = NSMutableString(string: nsResult)
-            mutable.replaceCharacters(in: r, with: newLine + preservedNewline)
+            let (body, lineBreak) = splitLineBreak((result as NSString).substring(with: r))
+            let stripped = stripHeadingMarker(from: body)
+            let newBody = targetLevel == 0
+                ? stripped
+                : String(repeating: "#", count: targetLevel) + " " + stripped
+            let mutable = NSMutableString(string: result)
+            mutable.replaceCharacters(in: r, with: newBody + lineBreak)
             result = mutable as String
         }
         // Compute new selection — keep it on the same logical lines.
@@ -63,7 +57,7 @@ enum MarkdownEdits {
     /// Detect the existing heading level of a single line of source.
     /// Returns 0 if the line is a paragraph.
     static func detectedHeadingLevel(of line: String) -> Int {
-        let trimmed = line.trimmingNewline()
+        let trimmed = splitLineBreak(line).body
         var hashes = 0
         for ch in trimmed {
             if ch == "#" { hashes += 1; if hashes > 6 { return 0 } } else { break }
@@ -75,14 +69,14 @@ enum MarkdownEdits {
         return hashes
     }
 
-    /// Strip leading `#`s and the single space after them.
+    /// Strip leading `#`s and the single space after them. A line break
+    /// at the end is kept as it is.
     static func stripHeadingMarker(from line: String) -> String {
         let level = detectedHeadingLevel(of: line)
         guard level > 0 else { return line }
-        let trimmed = line.trimmingNewline()
-        let startIdx = trimmed.index(trimmed.startIndex, offsetBy: level + 1)
-        let stripped = String(trimmed[startIdx...])
-        return stripped + (line.hasSuffix("\n") ? "\n" : "")
+        let (body, lineBreak) = splitLineBreak(line)
+        let startIdx = body.index(body.startIndex, offsetBy: level + 1)
+        return String(body[startIdx...]) + lineBreak
     }
 
     // MARK: - Move line
@@ -98,27 +92,25 @@ enum MarkdownEdits {
         let blockRange = NSRange(location: blockStart, length: blockEnd - blockStart)
         let blockText = nsString.substring(with: blockRange)
 
+        // Line breaks are compared as UTF-16, not with `hasSuffix("\n")`:
+        // "\r\n" is one Character, so a CRLF line never "ends in \n" and
+        // the old checks added a bare "\n" behind it.
         switch direction {
         case .up:
             guard blockStart > 0 else { return Result(text: text, selection: selection) }
             let prevRange = nsString.lineRange(for: NSRange(location: blockStart - 1, length: 0))
-            var newBlock = blockText
-            var newPrev = nsString.substring(with: prevRange)
-            // If the moving block has no trailing newline (last line of doc),
-            // we'd lose the line break when swapping. Compensate.
-            if !newBlock.hasSuffix("\n") {
-                // Move the trailing newline from prev onto the block
-                if newPrev.hasSuffix("\n") {
-                    newPrev.removeLast()
-                    newBlock = newBlock + "\n"
-                }
-            }
+            let prev = splitLineBreak(nsString.substring(with: prevRange))
+            let block = splitLineBreak(blockText)
+            // The last line of the document has no break of its own; it
+            // takes the one of the line it swaps with, which then ends the
+            // document without one.
+            let combined = block.lineBreak.isEmpty
+                ? block.body + prev.lineBreak + prev.body
+                : blockText + prev.body + prev.lineBreak
             let combinedRange = NSRange(location: prevRange.location,
                                         length: prevRange.length + blockRange.length)
-            let combined = newBlock + newPrev
             let mutable = NSMutableString(string: nsString)
             mutable.replaceCharacters(in: combinedRange, with: combined)
-            // Shift the selection up by prevRange.length
             let newSel = NSRange(location: max(0, selection.location - prevRange.length),
                                  length: selection.length)
             return Result(text: mutable as String, selection: clamp(newSel, in: mutable as String))
@@ -127,25 +119,20 @@ enum MarkdownEdits {
             let docLength = nsString.length
             guard blockEnd < docLength else { return Result(text: text, selection: selection) }
             let nextRange = nsString.lineRange(for: NSRange(location: blockEnd, length: 0))
-            var newBlock = blockText
-            var newNext = nsString.substring(with: nextRange)
-            // If the next line has no trailing newline (it's the last line of
-            // doc), the block needs one to keep its newline-ness when
-            // appearing before it.
-            if !newBlock.hasSuffix("\n") {
-                newBlock = newBlock + "\n"
-                if newNext.hasSuffix("\n") {
-                    newNext.removeLast()
-                }
-            }
+            let next = splitLineBreak(nsString.substring(with: nextRange))
+            let block = splitLineBreak(blockText)
+            // A block with a line below it always ends in a break. When that
+            // line is the last one and has none, the block hands it its
+            // break and ends the document without one.
+            let combined = next.lineBreak.isEmpty
+                ? next.body + block.lineBreak + block.body
+                : next.body + next.lineBreak + blockText
             let combinedRange = NSRange(location: blockRange.location,
                                         length: blockRange.length + nextRange.length)
-            let combined = newNext + newBlock
             let mutable = NSMutableString(string: nsString)
             mutable.replaceCharacters(in: combinedRange, with: combined)
-            // Shift the selection down by nextRange.length
-            let newSel = NSRange(location: selection.location + nextRange.length,
-                                 length: selection.length)
+            let shift = nextRange.length + (next.lineBreak.isEmpty ? (block.lineBreak as NSString).length : 0)
+            let newSel = NSRange(location: selection.location + shift, length: selection.length)
             return Result(text: mutable as String, selection: clamp(newSel, in: mutable as String))
         }
     }
@@ -160,16 +147,19 @@ enum MarkdownEdits {
             // Duplicate the current line
             let lineRange = nsString.lineRange(for: NSRange(location: selection.location, length: 0))
             let originalLine = nsString.substring(with: lineRange)
-            let lineHasTrailingNewline = originalLine.hasSuffix("\n")
             // Duplicate sits AFTER the existing line. If the original ends
-            // with `\n`, just repeat it. Otherwise (last line of doc) we
-            // prepend a `\n` to the duplicate so the two stay distinct lines.
-            let duplicate = lineHasTrailingNewline ? originalLine : ("\n" + originalLine)
+            // with a line break, just repeat it. Otherwise (last line of
+            // doc) the copy is preceded by the document's own break so the
+            // two stay distinct lines and CRLF stays CRLF.
+            let lineBreak = splitLineBreak(originalLine).lineBreak
+            let duplicate = lineBreak.isEmpty
+                ? documentLineBreak(in: nsString) + originalLine
+                : originalLine
             let mutable = NSMutableString(string: nsString)
-            let insertLoc = NSMaxRange(lineRange)
-            mutable.insert(duplicate, at: insertLoc)
-            // Move the cursor to the same column on the duplicated line.
-            let newCursor = NSRange(location: selection.location + duplicate.count, length: 0)
+            mutable.insert(duplicate, at: NSMaxRange(lineRange))
+            // Same column on the duplicated line. UTF-16 lengths, like every
+            // NSRange: `count` counts "\r\n" (and an emoji) as one.
+            let newCursor = NSRange(location: selection.location + (duplicate as NSString).length, length: 0)
             return Result(text: mutable as String, selection: clamp(newCursor, in: mutable as String))
         } else {
             // Duplicate the selection inline (right after the existing one)
@@ -177,7 +167,7 @@ enum MarkdownEdits {
             let mutable = NSMutableString(string: nsString)
             mutable.insert(snippet, at: NSMaxRange(selection))
             // Place cursor at the end of the duplicated copy, no selection
-            let newCursor = NSRange(location: NSMaxRange(selection) + snippet.count, length: 0)
+            let newCursor = NSRange(location: NSMaxRange(selection) + (snippet as NSString).length, length: 0)
             return Result(text: mutable as String, selection: clamp(newCursor, in: mutable as String))
         }
     }
@@ -203,6 +193,9 @@ enum MarkdownEdits {
     /// can fall through to default insertion.
     static func autoPair(input: String, in text: String, selection: NSRange) -> Result? {
         guard input.count == 1, let ch = input.first else { return nil }
+        if selection.length == 0, !shouldAutoPair(ch, in: text, at: selection.location) {
+            return nil
+        }
         let pair: Character?
         switch ch {
         case "(": pair = ")"
@@ -222,7 +215,7 @@ enum MarkdownEdits {
             let replaced = String(ch) + inner + String(close)
             let mutable = NSMutableString(string: nsString)
             mutable.replaceCharacters(in: selection, with: replaced)
-            let newSel = NSRange(location: selection.location + 1, length: inner.count)
+            let newSel = NSRange(location: selection.location + 1, length: (inner as NSString).length)
             return Result(text: mutable as String, selection: newSel)
         } else {
             // Insert pair, place cursor between
@@ -232,6 +225,76 @@ enum MarkdownEdits {
             let newSel = NSRange(location: selection.location + 1, length: 0)
             return Result(text: mutable as String, selection: newSel)
         }
+    }
+
+    /// Whether typing `ch` at `location` (no selection) should insert
+    /// the closing half too. Pairing only makes sense where a new span
+    /// starts:
+    ///   - never right before a word (`(|word` stays `(word`);
+    ///   - `'` / `"` / `` ` `` not right after a letter or digit — that's
+    ///     an apostrophe (`don't`, `geht's`) or the end of a span;
+    ///   - `` ` `` not after another backtick, so typing a ``` fence gives
+    ///     exactly three backticks.
+    static func shouldAutoPair(_ ch: Character, in text: String, at location: Int) -> Bool {
+        let ns = text as NSString
+        guard location >= 0, location <= ns.length else { return false }
+        let next: Character? = location < ns.length
+            ? ns.substring(with: NSRange(location: location, length: 1)).first : nil
+        let prev: Character? = location > 0
+            ? ns.substring(with: NSRange(location: location - 1, length: 1)).first : nil
+        if let next, next.isLetter || next.isNumber || next == "_" { return false }
+        switch ch {
+        case "'", "\"":
+            if let prev, prev.isLetter || prev.isNumber || prev == ch { return false }
+        case "`":
+            if let prev, prev.isLetter || prev.isNumber || prev == "`" { return false }
+        default:
+            break
+        }
+        return true
+    }
+
+    /// The only characters `smartPunctuation(after:in:selection:)` can
+    /// rewrite after. Anything else is left alone without looking at the
+    /// document.
+    static func isSmartPunctuationTrigger(_ input: String) -> Bool {
+        input == "-" || input == "." || input == "\"" || input == "'"
+    }
+
+    /// Whether smart punctuation may rewrite text at `location`. Markdown
+    /// syntax is made of the very characters it replaces, so stay out of
+    /// code, frontmatter and HTML, and away from lines that are only
+    /// dashes / pipes / colons (`---` rules and frontmatter fences,
+    /// `|---|` table separators) — the old behaviour turned those into
+    /// em-dashes.
+    static func smartPunctuationAllowed(in text: String, at location: Int) -> Bool {
+        let ns = text as NSString
+        guard location > 0, location <= ns.length else { return false }
+        let lineRange = ns.lineRange(for: NSRange(location: location - 1, length: 0))
+        let linePrefix = ns.substring(with: NSRange(location: lineRange.location,
+                                                    length: location - lineRange.location))
+        let trimmed = linePrefix.trimmingCharacters(in: .whitespaces)
+        // Only-structural line so far: `---`, `|--`, `:--`, `- ` bullets.
+        if trimmed.allSatisfy({ "-|:–—".contains($0) }) { return false }
+        // Inside an inline code span: odd number of backticks before us.
+        if linePrefix.filter({ $0 == "`" }).count % 2 == 1 { return false }
+        // Inside an HTML tag / comment (`<a href="…">`, `<!-- … -->`).
+        if let lt = linePrefix.lastIndex(of: "<"), !linePrefix[lt...].contains(">") { return false }
+        // Inside a link destination `](…`.
+        if let open = linePrefix.range(of: "](", options: .backwards),
+           !linePrefix[open.upperBound...].contains(")") { return false }
+        // Fenced code block or frontmatter: count fences above the line.
+        let before = ns.substring(to: lineRange.location)
+        var inFence = false
+        var inFrontmatter = before.hasPrefix("---\n") || before.hasPrefix("---\r\n")
+        var lineIndex = 0
+        before.enumerateLines { line, _ in
+            let t = line.trimmingCharacters(in: .whitespaces)
+            if inFrontmatter && lineIndex > 0 && t == "---" { inFrontmatter = false }
+            if t.hasPrefix("```") || t.hasPrefix("~~~") { inFence.toggle() }
+            lineIndex += 1
+        }
+        return !inFence && !inFrontmatter
     }
 
     /// If the cursor is right before `close` (e.g. `)` typed when the
@@ -347,18 +410,31 @@ enum MarkdownEdits {
         return ranges
     }
 
-    private static func clamp(_ range: NSRange, in text: String) -> NSRange {
+    /// A line and its line break ("\r\n", "\n", "\r" or none), split by
+    /// UTF-16 so a CRLF pair is recognised as one break.
+    static func splitLineBreak(_ line: String) -> (body: String, lineBreak: String) {
+        let ns = line as NSString
+        let n = ns.length
+        if n >= 2, ns.character(at: n - 2) == 0x0D, ns.character(at: n - 1) == 0x0A {
+            return (ns.substring(to: n - 2), "\r\n")
+        }
+        if n >= 1, ns.character(at: n - 1) == 0x0A || ns.character(at: n - 1) == 0x0D {
+            return (ns.substring(to: n - 1), ns.substring(from: n - 1))
+        }
+        return (line, "")
+    }
+
+    /// The break the document's first line ends with, "\n" if it has none.
+    static func documentLineBreak(in ns: NSString) -> String {
+        var start = 0, end = 0, contentsEnd = 0
+        ns.getLineStart(&start, end: &end, contentsEnd: &contentsEnd, for: NSRange(location: 0, length: 0))
+        return end > contentsEnd ? ns.substring(with: NSRange(location: contentsEnd, length: end - contentsEnd)) : "\n"
+    }
+
+    static func clamp(_ range: NSRange, in text: String) -> NSRange {
         let total = (text as NSString).length
         let location = max(0, min(range.location, total))
         let length = max(0, min(range.length, total - location))
         return NSRange(location: location, length: length)
-    }
-}
-
-private extension String {
-    func trimmingNewline() -> String {
-        if hasSuffix("\r\n") { return String(dropLast(2)) }
-        if hasSuffix("\n") { return String(dropLast()) }
-        return self
     }
 }

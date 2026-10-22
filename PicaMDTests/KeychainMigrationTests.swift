@@ -7,9 +7,10 @@ import Security
 /// Tests the `Keychain` enum (Keychain.swift) and the QuickMD→PicaMD
 /// keychain migration path inside `UserDefaultsMigration.swift`.
 ///
-/// All tests touch the REAL login keychain using unique, throwaway
-/// account names that include a UUID. Every entry written is cleaned
-/// up in `tearDown` so the suite is safe to run repeatedly.
+/// All tests touch the real login keychain, but only under the test
+/// host's services (`Keychain.service`, `legacyKeychainService`), never
+/// PicaMD's or QuickMD's, so they can't read, overwrite or delete the
+/// user's API keys. Every entry written is cleaned up again.
 // NOT @MainActor: the Keychain primitives are plain statics, so setUp/
 // tearDown and most tests stay nonisolated. Only the migration call is
 // main-actor-isolated; that single test hops via `await MainActor.run`.
@@ -74,7 +75,7 @@ final class KeychainTests: XCTestCase {
     // MARK: - testValueForServiceReadsArbitraryService
 
     func testValueForServiceReadsArbitraryService() {
-        let customService = "de.michaelwittmann.QuickMD.ai.TEST-\(runID!)"
+        let customService = "\(AppEnvironment.testHostBundleIdentifier).TEST-\(runID!)"
         let account       = uniqueAccount("valueForService")
         let expected      = "sk-test-vfs-\(runID!)"
 
@@ -120,31 +121,25 @@ final class KeychainTests: XCTestCase {
     // boundary — both of which Xcode 16 rejects.
     @MainActor
     func testMigrationCopiesOldKeyToNew() {
-        let oldService  = "de.michaelwittmann.QuickMD.ai"
+        // Both services belong to the test host, so the user's keys are
+        // out of reach and the test needn't skip when he has one.
+        let oldService  = UserDefaultsMigration.legacyKeychainService
         let oldAccount  = "QuickMD.ai.anthropic.apiKey"
         let newAccount  = AIProvider.anthropic.keychainAccount  // "PicaMD.ai.anthropic.apiKey"
         let seedValue   = "sk-test-\(runID!)"
-
-        // ── Cleanup closure — runs on any exit path ──────────────────────
-        defer {
-            // Remove the old-service item we seeded.
-            let oldQuery: [String: Any] = [
-                kSecClass as String:       kSecClassGenericPassword,
-                kSecAttrService as String: oldService,
-                kSecAttrAccount as String: oldAccount,
-            ]
+        let oldQuery: [String: Any] = [
+            kSecClass as String:       kSecClassGenericPassword,
+            kSecAttrService as String: oldService,
+            kSecAttrAccount as String: oldAccount,
+        ]
+        func removeItems() {
             SecItemDelete(oldQuery as CFDictionary)
-
-            // Remove the new-service item the migration created.
             Keychain.delete(account: newAccount)
         }
 
-        // ── Pre-condition: ensure the new account is empty before we start ──
-        // (If a real key exists here we abort gracefully to avoid clobbering it.)
-        if Keychain.get(account: newAccount) != nil {
-            // A real user key is stored; skip rather than overwrite it.
-            return
-        }
+        // A run that crashed half-way may have left both behind.
+        removeItems()
+        defer { removeItems() }
 
         // ── Seed the old-service item via raw SecItemAdd ─────────────────
         let addQuery: [String: Any] = [
@@ -156,20 +151,11 @@ final class KeychainTests: XCTestCase {
             kSecAttrSynchronizable as String: false,
         ]
         let addStatus = SecItemAdd(addQuery as CFDictionary, nil)
-
-        // If an item already lives at the exact old account (a real QuickMD
-        // user key), clean up and skip without failing — we must not
-        // overwrite real credentials.
-        if addStatus == errSecDuplicateItem {
-            return
-        }
         XCTAssertEqual(addStatus, errSecSuccess,
                        "SecItemAdd for old-service seed failed with OSStatus \(addStatus)")
 
         // ── Run migration with a fresh, isolated UserDefaults ────────────
-        let suiteName = "PicaMDMigrationTest-\(runID!)"
-        let isolatedDefaults = UserDefaults(suiteName: suiteName)!
-        defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
+        let isolatedDefaults = makeTestDefaults("QuickMDMigration")
         // The suite is brand-new, so the migration marker is absent and the
         // migration will run unconditionally. (This test is @MainActor, so
         // the @MainActor migration is called directly.)

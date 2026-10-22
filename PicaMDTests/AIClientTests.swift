@@ -3,6 +3,29 @@ import XCTest
 
 final class AIClientTests: XCTestCase {
 
+    // MARK: - Plain http to self-hosted providers
+
+    /// A custom provider on a fully qualified host over plain http (a
+    /// `.lan` name, Tailscale MagicDNS) must reach the network. App
+    /// Transport Security refused it with -1022 before any lookup. The
+    /// `.invalid` host then fails at DNS (or offline), which is fine; only
+    /// the ATS refusal is the bug.
+    func testPlainHTTPToAFullyQualifiedHostIsNotBlockedByATS() async {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 5
+        let session = URLSession(configuration: config)
+        var request = URLRequest(url: URL(string: "http://gpu.picamd-ats-probe.invalid:9/v1/models")!)
+        request.timeoutInterval = 5
+        do {
+            _ = try await session.data(for: request)
+        } catch let error as URLError {
+            XCTAssertNotEqual(error.code, .appTransportSecurityRequiresSecureConnection,
+                              "ATS blocks plain http to self-hosted providers")
+        } catch {
+            XCTFail("unexpected error \(error)")
+        }
+    }
+
     // MARK: - parseChatResponse (OpenAI shape)
 
     func testParseStandardOpenAIResponse() throws {
@@ -78,10 +101,10 @@ final class AIClientTests: XCTestCase {
           "content": [
             { "type": "text", "text": "Hi from Claude." }
           ],
-          "model": "claude-sonnet-4-6"
+          "model": "claude-sonnet-5-5"
         }
         """.data(using: .utf8)!
-        let result = try AIProvider.anthropic.parseResponseText(json)
+        let result = try AIAPIFormat.anthropic.parseResponseText(json)
         XCTAssertEqual(result, "Hi from Claude.")
     }
 
@@ -94,7 +117,7 @@ final class AIClientTests: XCTestCase {
           ]
         }
         """.data(using: .utf8)!
-        let result = try AIProvider.anthropic.parseResponseText(json)
+        let result = try AIAPIFormat.anthropic.parseResponseText(json)
         XCTAssertEqual(result, "First.\n\nSecond.")
     }
 
@@ -102,7 +125,7 @@ final class AIClientTests: XCTestCase {
         let json = """
         { "error": { "message": "rate limit exceeded", "type": "rate_limit_error" } }
         """.data(using: .utf8)!
-        XCTAssertThrowsError(try AIProvider.anthropic.parseResponseText(json))
+        XCTAssertThrowsError(try AIAPIFormat.anthropic.parseResponseText(json))
     }
 
     func testParseAnthropicNonText() {
@@ -110,22 +133,23 @@ final class AIClientTests: XCTestCase {
         let json = """
         { "content": [ { "type": "tool_use", "name": "x", "input": {} } ] }
         """.data(using: .utf8)!
-        XCTAssertThrowsError(try AIProvider.anthropic.parseResponseText(json))
+        XCTAssertThrowsError(try AIAPIFormat.anthropic.parseResponseText(json))
     }
 
     // MARK: - URL parsing
 
     func testInitRejectsInvalidEndpoint() {
-        XCTAssertNil(AIClient(provider: .openai, endpointString: "not a url",
+        XCTAssertNil(AIClient(format: .openAI, endpointString: "not a url",
                                model: "m", apiKey: "k"))
-        XCTAssertNil(AIClient(provider: .openai, endpointString: "",
+        XCTAssertNil(AIClient(format: .openAI, endpointString: "",
                                model: "m", apiKey: "k"))
-        XCTAssertNil(AIClient(provider: .openai, endpointString: "/no/scheme",
+        XCTAssertNil(AIClient(format: .openAI, endpointString: "/no/scheme",
                                model: "m", apiKey: "k"))
     }
 
     func testInitAcceptsLocalhost() {
-        let c = AIClient(provider: .localOpenAICompat,
+        // Custom providers point at self-hosted servers over plain http.
+        let c = AIClient(format: .openAICompatible,
                           endpointString: "http://localhost:1234/v1",
                           model: "m",
                           apiKey: nil)
@@ -139,16 +163,15 @@ final class AIClientTests: XCTestCase {
 
 final class AIConfigTests: XCTestCase {
     private var defaults: UserDefaults!
-    private let suiteName = "PicaMD.AIConfigTests"
 
     override func setUp() {
         super.setUp()
-        UserDefaults().removePersistentDomain(forName: suiteName)
-        defaults = UserDefaults(suiteName: suiteName)
+        // Named after the test host and emptied after each test, like
+        // every other suite (see `makeTestDefaults`).
+        defaults = makeTestDefaults("AIConfig")
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
         defaults = nil
         super.tearDown()
     }
@@ -161,7 +184,7 @@ final class AIConfigTests: XCTestCase {
                        "https://api.anthropic.com/v1")
         XCTAssertEqual(cfg.endpoint(for: .openai),
                        "https://api.openai.com/v1")
-        XCTAssertTrue(cfg.endpoint(for: .localOpenAICompat).hasPrefix("http://localhost"))
+        XCTAssertTrue(cfg.customProviders.isEmpty)
     }
 
     func testRoundtripSaveAndLoad() {
@@ -182,19 +205,22 @@ final class AIConfigTests: XCTestCase {
                        AIProvider.anthropic.defaultEndpoint)
     }
 
-    func testV1MigrationLiftsOldKeysToProviderShape() {
-        // Simulate the old-style flat keys from the original AI hook.
+    func testV1MigrationLiftsOldKeysToACustomProvider() throws {
+        // Simulate the old-style flat keys from the original AI hook,
+        // which only knew a local server.
         defaults.set(true, forKey: "PicaMD.ai.enabled")
         defaults.set("http://10.0.0.5:11434/v1", forKey: "PicaMD.ai.endpointURL")
         defaults.set("qwen2.5", forKey: "PicaMD.ai.model")
 
-        let loaded = AIConfig.load(defaults: defaults)
+        let loaded = AIConfig.load(defaults: defaults, keyStore: InMemoryKeyStore(),
+                                   appleIntelligenceAvailable: { true })
         XCTAssertTrue(loaded.enabled)
-        XCTAssertEqual(loaded.defaultProvider, .localOpenAICompat,
-                       "v1 only had a local endpoint — migrate to localOpenAICompat")
-        XCTAssertEqual(loaded.endpoint(for: .localOpenAICompat),
-                       "http://10.0.0.5:11434/v1")
-        XCTAssertEqual(loaded.model(for: .localOpenAICompat), "qwen2.5")
+        let local = try XCTUnwrap(loaded.customProvider(id: AIProviderRef.legacyLocalProviderID))
+        XCTAssertEqual(loaded.defaultProvider, .custom(AIProviderRef.legacyLocalProviderID),
+                       "v1 only had a local endpoint — it stays the default, as a custom provider")
+        XCTAssertEqual(local.name, "Local")
+        XCTAssertEqual(local.endpointURL, "http://10.0.0.5:11434/v1")
+        XCTAssertEqual(local.model, "qwen2.5")
     }
 }
 
@@ -207,10 +233,10 @@ final class AIRequestBuilderTests: XCTestCase {
         let req = AICompletionRequest(
             userPrompt: "hello",
             systemPrompt: "be concise",
-            model: "claude-sonnet-4-6"
+            model: "claude-sonnet-5-5"
         )
         let urlReq = try AIRequestBuilder.build(
-            provider: .anthropic,
+            format: .anthropic,
             endpoint: url,
             apiKey: "sk-ant-123",
             request: req
@@ -222,7 +248,7 @@ final class AIRequestBuilderTests: XCTestCase {
 
         let body = try XCTUnwrap(urlReq.httpBody)
         let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(json["model"] as? String, "claude-sonnet-4-6")
+        XCTAssertEqual(json["model"] as? String, "claude-sonnet-5-5")
         XCTAssertEqual(json["system"] as? String, "be concise")
         let messages = try XCTUnwrap(json["messages"] as? [[String: String]])
         XCTAssertEqual(messages.count, 1)
@@ -232,9 +258,9 @@ final class AIRequestBuilderTests: XCTestCase {
 
     func testAnthropicMissingKeyThrows() {
         let url = URL(string: "https://api.anthropic.com/v1")!
-        let req = AICompletionRequest(userPrompt: "x", model: "claude-sonnet-4-6")
+        let req = AICompletionRequest(userPrompt: "x", model: "claude-sonnet-5-5")
         XCTAssertThrowsError(try AIRequestBuilder.build(
-            provider: .anthropic,
+            format: .anthropic,
             endpoint: url,
             apiKey: nil,
             request: req
@@ -246,10 +272,10 @@ final class AIRequestBuilderTests: XCTestCase {
         let req = AICompletionRequest(
             userPrompt: "hi",
             systemPrompt: "be terse",
-            model: "gpt-4o-mini"
+            model: "gpt-6-luna"
         )
         let urlReq = try AIRequestBuilder.build(
-            provider: .openai,
+            format: .openAI,
             endpoint: url,
             apiKey: "sk-456",
             request: req
@@ -269,11 +295,11 @@ final class AIRequestBuilderTests: XCTestCase {
         XCTAssertEqual(json["stream"] as? Bool, false)
     }
 
-    func testLocalProviderDoesNotRequireKey() throws {
+    func testCustomProviderDoesNotRequireKey() throws {
         let url = URL(string: "http://localhost:1234/v1")!
         let req = AICompletionRequest(userPrompt: "hi", model: "local-model")
         let urlReq = try AIRequestBuilder.build(
-            provider: .localOpenAICompat,
+            format: .openAICompatible,
             endpoint: url,
             apiKey: nil,
             request: req
@@ -284,9 +310,9 @@ final class AIRequestBuilderTests: XCTestCase {
 
     func testOpenAIWithoutKeyThrows() {
         let url = URL(string: "https://api.openai.com/v1")!
-        let req = AICompletionRequest(userPrompt: "x", model: "gpt-4o-mini")
+        let req = AICompletionRequest(userPrompt: "x", model: "gpt-6-luna")
         XCTAssertThrowsError(try AIRequestBuilder.build(
-            provider: .openai,
+            format: .openAI,
             endpoint: url,
             apiKey: nil,
             request: req
@@ -346,5 +372,82 @@ final class AIPresetTests: XCTestCase {
         let data = try JSONEncoder().encode(preset)
         let decoded = try JSONDecoder().decode(AIPreset.self, from: data)
         XCTAssertEqual(decoded, preset)
+    }
+}
+
+// MARK: - Current models (Claude Sonnet 5.5, GPT-6 Luna)
+
+final class AIRequestShapeForCurrentModelsTests: XCTestCase {
+
+    private func body(_ format: AIAPIFormat, _ endpoint: String, model: String) throws -> [String: Any] {
+        let req = try AIRequestBuilder.build(format: format, endpoint: URL(string: endpoint)!, apiKey: "k",
+                                             request: AICompletionRequest(userPrompt: "hi", systemPrompt: "sys", model: model))
+        return try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(req.httpBody)) as? [String: Any])
+    }
+
+    func testNoRequestSendsSamplingParameters() throws {
+        // Sonnet 5.5 and OpenAI's reasoning models answer `temperature`
+        // with a 400.
+        let bodies = [
+            try body(.anthropic, "https://api.anthropic.com/v1", model: "claude-sonnet-5-5"),
+            try body(.openAI, "https://api.openai.com/v1", model: "gpt-6-luna"),
+            try body(.openAICompatible, "http://box:11434/v1", model: "llama3.3"),
+        ]
+        for json in bodies {
+            XCTAssertNil(json["temperature"])
+            XCTAssertNil(json["top_p"])
+            XCTAssertNil(json["top_k"])
+        }
+    }
+
+    func testAnthropicBodyHasNoThinkingEffortOrFallbacks() throws {
+        let json = try body(.anthropic, "https://api.anthropic.com/v1", model: "claude-sonnet-5-5")
+        XCTAssertEqual(Set(json.keys), ["model", "max_tokens", "messages", "system"])
+    }
+
+    func testOpenAIReasoningModelUsesMaxCompletionTokens() throws {
+        let json = try body(.openAI, "https://api.openai.com/v1", model: "gpt-6-luna")
+        XCTAssertEqual(json["max_completion_tokens"] as? Int, AICompletionRequest.defaultMaxTokens)
+        XCTAssertNil(json["max_tokens"])
+    }
+
+    func testTextOnlyAfterAThinkingBlock() throws {
+        let json = #"""
+        {"content":[{"type":"thinking","thinking":"","signature":"abc"},{"type":"text","text":"Clean text."}],"stop_reason":"end_turn"}
+        """#
+        XCTAssertEqual(try AIAPIFormat.anthropic.parseResponseText(Data(json.utf8)), "Clean text.")
+    }
+
+    func testRefusalCarriesStopDetails() {
+        func refusal(_ json: String) -> AIError? {
+            do {
+                _ = try AIAPIFormat.anthropic.parseResponseText(Data(json.utf8))
+                return nil
+            } catch {
+                return error as? AIError
+            }
+        }
+        XCTAssertEqual(refusal(#"{"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber","explanation":"Looks like exploit development."}}"#),
+                       .refused("Looks like exploit development."))
+        XCTAssertEqual(refusal(#"{"content":[],"stop_reason":"refusal","stop_details":{"type":"refusal","category":"general_harms"}}"#),
+                       .refused("Policy category: general_harms."))
+        XCTAssertEqual(refusal(#"{"content":[{"type":"text","text":"partial"}],"stop_reason":"refusal","stop_details":null}"#),
+                       .refused(nil))
+        XCTAssertTrue(AIError.refused("Looks like exploit development.").errorDescription?
+            .contains("Looks like exploit development.") ?? false)
+    }
+
+    func testContextWindowStopIsTruncation() {
+        let json = #"{"content":[{"type":"text","text":"half"}],"stop_reason":"model_context_window_exceeded"}"#
+        XCTAssertThrowsError(try AIAPIFormat.anthropic.parseResponseText(Data(json.utf8))) {
+            XCTAssertEqual($0 as? AIError, .truncated)
+        }
+    }
+
+    func testCurrentDefaultModels() {
+        XCTAssertEqual(AIProvider.anthropic.defaultModel, "claude-sonnet-5-5")
+        XCTAssertEqual(AIProvider.openai.defaultModel, "gpt-6-luna")
+        XCTAssertFalse(AIProvider.appleIntelligence.requiresAPIKey)
+        XCTAssertNil(AIProvider.appleIntelligence.apiFormat)
     }
 }

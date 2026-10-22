@@ -21,6 +21,17 @@ class WebViewBlockView: BlockAttachmentView {
     /// The base class also sets it when it stages via resourceBaseURL().
     var stagedFileURL: URL?
 
+    /// Unique per view. Staged HTML files used to be named after the
+    /// block's character offset, so two windows with a math block at the
+    /// same offset overwrote (and deleted) each other's file.
+    let stagingID = UUID().uuidString
+
+    /// Palette darkness the current HTML was rendered for. Reloading is
+    /// only needed when that flips — not for every theme tweak (font
+    /// size slider, status-bar toggle…), which reloaded every KaTeX and
+    /// Mermaid view in every window.
+    private var renderedDark: Bool?
+
     override init(block: ExtractedBlock, documentURL: URL?) {
         let cfg = WKWebViewConfiguration()
         let prefs = WKWebpagePreferences()
@@ -92,10 +103,11 @@ class WebViewBlockView: BlockAttachmentView {
         case .image:     kind = "image"
         case .table:     kind = "table"
         }
-        return "\(kind)-\(block.range.location).html"
+        return "\(kind)-\(stagingID).html"
     }
 
     private func loadHTML() {
+        renderedDark = isDark
         let bg = isDark ? "#1d1d1f" : "#fafafa"
         let fg = isDark ? "#e0e0e0" : "#1a1a1a"
         let html = """
@@ -157,6 +169,7 @@ class WebViewBlockView: BlockAttachmentView {
     }
 
     override func appearanceChanged() {
+        guard renderedDark != isDark else { return }
         loadHTML()
     }
 

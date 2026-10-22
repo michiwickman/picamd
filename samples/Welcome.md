@@ -14,15 +14,16 @@ a different mode, you're always editing the actual Markdown source.
 
 ## Try the AI presets
 
-Settings → AI (`⌘,` then click the AI tab) lets you wire up Anthropic
-Claude, OpenAI, or a local LM Studio / Ollama. Off by default. Once
-configured:
+Settings → AI (`⌘,`, then AI) lets you wire up Anthropic
+Claude, OpenAI, Apple Intelligence (on-device) or your own
+OpenAI-compatible server such as Ollama or LM Studio. Off by default.
+Once configured:
 
 - Select a paragraph
-- `⌃⌘1` — Bereinige Markdown (cleans typography, em-dashes, etc.)
-- `⌃⌘2` — Fasse zusammen (3-bullet summary as blockquote)
-- `⌃⌘3` — Schreibe natürlicher (rewrite for flow)
-- `⌃⌘4` — Erweitere diesen Absatz (continue writing)
+- `⌃⌘1` — Clean Up Markdown (cleans typography, em-dashes, etc.)
+- `⌃⌘2` — Summarize (3–5 bullet summary as blockquote)
+- `⌃⌘3` — Rewrite Naturally (rewrite for flow)
+- `⌃⌘4` — Continue Paragraph (continue writing)
 - `⌃Space` — fuzzy-search picker over all 9 presets
 
 Every preset is fully editable in Settings → AI → Presets.
@@ -32,17 +33,14 @@ Add your own, change the prompts, rebind hotkeys.
 
 PicaMD ships an MCP server (`picamd-mcp`) that lets Claude Code
 read and edit your open documents *by section*, not by re-reading
-the whole file each pass. Add to your `~/.config/claude-code/mcp.json`:
+the whole file each pass. Add it to Claude Code:
 
-```json
-{
-  "mcpServers": {
-    "picamd": {
-      "command": "/Applications/PicaMD.app/Contents/Resources/picamd-mcp"
-    }
-  }
-}
+```bash
+claude mcp add picamd -- /Applications/PicaMD.app/Contents/Resources/picamd-mcp
 ```
+
+Other MCP clients take the same command in their `mcpServers`
+configuration.
 
 Then in Claude Code:
 
@@ -79,8 +77,8 @@ Tables:
 | Shortcut | What it does |
 |---|---|
 | `⌘,` | Settings (themes, AI, presets) |
-| `⌘T` | New tab (with macOS tabbing on) |
-| `⌘⇧P` | Command palette (fuzzy over headings) |
+| `⌘T` | New tab in the front window |
+| `⌘⇧P` | Command palette (headings and commands) |
 | `⌃⌘F` | Focus mode (dim non-cursor paragraphs) |
 | `⌃⌘Y` | Typewriter mode (cursor stays centered) |
 | `⌃Space` | AI preset picker |
@@ -105,28 +103,32 @@ Footnotes are real too[^1].
 
 ## Export anywhere
 
-`File → Export As…` covers:
+`File → Export As` covers:
 
-- **HTML** — in-process, fully self-contained file with embedded
-  CSS, KaTeX (CDN), Mermaid (CDN). Works offline once cached.
+- **HTML** — one file with the CSS embedded. Math and diagrams load
+  KaTeX and Mermaid from a CDN when the file is opened, so they need
+  a network connection.
 - **PDF / DOCX / EPUB** via `pandoc` (auto-detected if installed).
   `brew install pandoc` if missing.
 
 ## Privacy
 
-Nothing is sent to any server you didn't configure yourself. AI
-endpoints, MCP — all local or directed at your chosen API. No
-telemetry, no analytics, no PicaMD-owned proxy. The README covers
-this in detail.
+No telemetry, no analytics, no PicaMD server. The update check
+fetches `appcast.xml` from GitHub, and the first Mermaid diagram
+downloads Mermaid from a CDN. AI requests go only to the provider you
+chose, when you run a preset; Apple Intelligence runs on-device. The
+MCP server talks only to local clients. The README covers this in
+detail.
 
 ## Where to next
 
-- **Settings → Palette / Typography** to make this comfortable for
+- **Settings → Appearance** (presets, palette, fonts, line width) and
+  **Settings → Editor** (typing, blocks) to make this comfortable for
   *your* eyes (try Editorial preset for a serif H1 / sans body
   combo).
 - **Add an AI preset** for whatever you do most ("Translate to
   English", "Make it pirate-speak", whatever).
 - **File a bug** at <https://github.com/michiwickman/picamd/issues>
-  if something's off — the alpha needs your eyes.
+  if something's off.
 
 Have fun.

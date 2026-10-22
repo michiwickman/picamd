@@ -105,7 +105,7 @@ final class MermaidBlockView: WebViewBlockView {
         </body></html>
         """
 
-        let htmlURL = cacheDir.appendingPathComponent("mermaid-\(block.range.location).html")
+        let htmlURL = cacheDir.appendingPathComponent("mermaid-\(stagingID).html")
         do {
             try html.write(to: htmlURL, atomically: true, encoding: .utf8)
             stagedFileURL = htmlURL   // so WebViewBlockView.deinit can delete it

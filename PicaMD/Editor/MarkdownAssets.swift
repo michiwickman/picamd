@@ -25,7 +25,7 @@ enum MarkdownAssets {
 
         let baseName = sourceURL.deletingPathExtension().lastPathComponent
         let ext = sourceURL.pathExtension
-        let dest = uniqueDestination(in: assetsDir, baseName: baseName, ext: ext)
+        let dest = uniqueDestination(in: assetsDir, baseName: safeFileName(baseName), ext: ext)
         try FileManager.default.copyItem(at: sourceURL, to: dest)
         return SavedImage(
             absoluteURL: dest,
@@ -71,7 +71,32 @@ enum MarkdownAssets {
 
     /// Build a Markdown image-syntax string for a saved image.
     static func markdownSyntax(for image: SavedImage) -> String {
-        return "![\(image.altText)](\(image.markdownPath))"
+        // Brackets in the alt text would close the `![…]` early.
+        let alt = image.altText
+            .replacingOccurrences(of: "[", with: "(")
+            .replacingOccurrences(of: "]", with: ")")
+        return "![\(alt)](\(image.markdownPath))"
+    }
+
+    /// A file name that works unescaped in a Markdown link: macOS
+    /// screenshot names ("Screenshot 2026-09-24 at 12.00.00") contain
+    /// spaces, which make `![…](./assets/…)` invalid CommonMark — other
+    /// renderers then show the raw text. Runs of anything but letters,
+    /// digits, `.`, `-` and `_` become a single `-`.
+    static func safeFileName(_ name: String) -> String {
+        var out = ""
+        var lastWasDash = false
+        for scalar in name.unicodeScalars {
+            if CharacterSet.alphanumerics.contains(scalar) || scalar == "." || scalar == "_" || scalar == "-" {
+                out.unicodeScalars.append(scalar)
+                lastWasDash = scalar == "-"
+            } else if !lastWasDash {
+                out.append("-")
+                lastWasDash = true
+            }
+        }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-."))
+        return trimmed.isEmpty ? "image" : trimmed
     }
 
     // MARK: - Helpers
